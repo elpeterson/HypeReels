@@ -1,0 +1,141 @@
+version: "3.9"
+
+# HypeReels Python Workers — Quorra (Unraid, 192.168.1.100)
+#
+# Deploy with:
+#   docker-compose -f docker-compose.workers.yml --env-file .env.workers up -d --build
+#
+# This file is separate from the root docker-compose.yml (local dev stack).
+# It is deployed on Quorra only. Do NOT use it on a developer laptop.
+#
+# GPU note (ADR-013): No --gpus all flag. The GTX 1080 Ti is reserved for
+# Frigate (home security NVR) and FileFlows (NVENC transcoding). All
+# HypeReels workers run CPU-only. Detection time is ~30-60s per clip-minute,
+# which is acceptable for async processing.
+
+services:
+
+  # ─── PostgreSQL 18 (dedicated HypeReels instance on Quorra) ──────────────
+  hypereels-postgres:
+    image: postgres:18
+    container_name: hypereels-postgres
+    restart: unless-stopped
+    ports:
+      - "7432:5432"
+    environment:
+      POSTGRES_DB: hypereels
+      POSTGRES_USER: hypereels
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - /mnt/user/appdata/hypereels-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hypereels -d hypereels"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Person Detection Worker (InsightFace buffalo_l, CPU-only) ────────────
+  hypereels-worker-detection:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hypereels-workers:latest
+    container_name: hypereels-worker-detection
+    restart: unless-stopped
+    # NO --gpus all — CPU-only per ADR-013
+    # Frigate NVR and FileFlows use the GTX 1080 Ti exclusively.
+    ports:
+      - "8000:8000"
+    environment:
+      - WORKER_TYPE=detection
+      - DATABASE_URL=postgresql://hypereels:${POSTGRES_PASSWORD}@192.168.1.100:7432/hypereels
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@192.168.1.137:6379
+      - MINIO_ENDPOINT=http://192.168.1.138:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=hypereels
+      - INSIGHTFACE_MODEL=buffalo_l
+      - INSIGHTFACE_COSINE_THRESHOLD=0.45
+      - PYTHON_WORKER_PORT=8000
+      - PYTHON_WORKER_WORKERS=2
+      - LOG_LEVEL=info
+    volumes:
+      - /mnt/cache/appdata/hypereels/tmp:/tmp/hypereels
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+    depends_on:
+      hypereels-postgres:
+        condition: service_healthy
+
+  # ─── Audio Analysis Worker (librosa, CPU-only) ────────────────────────────
+  hypereels-worker-audio:
+    image: hypereels-workers:latest
+    container_name: hypereels-worker-audio
+    restart: unless-stopped
+    environment:
+      - WORKER_TYPE=audio
+      - DATABASE_URL=postgresql://hypereels:${POSTGRES_PASSWORD}@192.168.1.100:7432/hypereels
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@192.168.1.137:6379
+      - MINIO_ENDPOINT=http://192.168.1.138:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=hypereels
+      - LOG_LEVEL=info
+    volumes:
+      - /mnt/cache/appdata/hypereels/tmp:/tmp/hypereels
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import librosa; print('ok')"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    depends_on:
+      hypereels-worker-detection:
+        condition: service_healthy
+
+  # ─── Assembly Worker (FFmpeg x264, CPU-only) ──────────────────────────────
+  hypereels-worker-assembly:
+    image: hypereels-workers:latest
+    container_name: hypereels-worker-assembly
+    restart: unless-stopped
+    environment:
+      - WORKER_TYPE=assembly
+      - DATABASE_URL=postgresql://hypereels:${POSTGRES_PASSWORD}@192.168.1.100:7432/hypereels
+      - REDIS_URL=redis://:${REDIS_PASSWORD}@192.168.1.137:6379
+      - MINIO_ENDPOINT=http://192.168.1.138:9000
+      - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY}
+      - MINIO_SECRET_KEY=${MINIO_SECRET_KEY}
+      - MINIO_BUCKET=hypereels
+      - FFMPEG_CRF=20
+      - FFMPEG_PRESET=fast
+      - LOG_LEVEL=info
+    volumes:
+      - /mnt/cache/appdata/hypereels/tmp:/tmp/hypereels
+    healthcheck:
+      test: ["CMD", "ffmpeg", "-version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: '8'
+          memory: 12G
+    depends_on:
+      hypereels-worker-detection:
+        condition: service_healthy

@@ -1,0 +1,190 @@
+---
+# HypeReels Prometheus Alerting Rules
+# File: docs/prometheus-alerts.yml
+#
+# Deploy: copy to the Prometheus rules directory on Quorra and reload.
+#
+#   cp docs/prometheus-alerts.yml /path/to/prometheus/rules/hypereels.yml
+#   curl -X POST http://192.168.1.100:9090/-/reload
+#
+# Verify rules loaded:
+#   curl -s http://192.168.1.100:9090/api/v1/rules | python3 -m json.tool | grep hypereels
+
+groups:
+  - name: hypereels
+    interval: 15s
+    rules:
+
+      # ── API Availability ────────────────────────────────────────────────────
+
+      - alert: HypeReelsAPIDown
+        expr: up{job="hypereels-api"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: hypereels
+        annotations:
+          summary: "HypeReels API is unreachable"
+          description: >
+            Prometheus cannot scrape the HypeReels API at 192.168.1.136:3001/metrics.
+            The API has been down for more than 2 minutes.
+            Check CT 113 status: pct status 113
+            Check PM2: pct exec 113 -- pm2 status
+            Check health: curl http://192.168.1.136:3001/health
+
+      # ── Queue Depth ─────────────────────────────────────────────────────────
+
+      - alert: HypeReelsQueueDepthHigh
+        expr: bullmq_queue_depth > 10
+        for: 5m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "HypeReels BullMQ queue depth is high ({{ $labels.queue }})"
+          description: >
+            Queue {{ $labels.queue }} has {{ $value }} jobs waiting.
+            This may indicate workers are down or processing is slower than expected.
+            Check Quorra worker containers: docker ps --filter name=hypereels
+            Check worker health: curl http://192.168.1.100:8000/health
+
+      - alert: HypeReelsPersonDetectionQueueStalled
+        expr: bullmq_queue_depth{queue="person-detection"} > 5
+        for: 15m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "Person detection queue has been backlogged for 15+ minutes"
+          description: >
+            The person-detection queue has {{ $value }} jobs and has not drained
+            in 15 minutes. This may indicate the worker-detection container is
+            down or CPU-bound beyond expected capacity.
+            InsightFace CPU mode is ~30-60s per clip-minute (ADR-013).
+            Check: docker logs hypereels-worker-detection
+
+      # ── Error Rates ─────────────────────────────────────────────────────────
+
+      - alert: HypeReels5xxRateHigh
+        expr: >
+          rate(http_requests_total{job="hypereels-api",status=~"5.."}[5m])
+          /
+          rate(http_requests_total{job="hypereels-api"}[5m])
+          > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "HypeReels API 5xx error rate above 1%"
+          description: >
+            5xx error rate is {{ $value | humanizePercentage }} over the last 5 minutes.
+            Check API logs: pct exec 113 -- pm2 logs hypereels-api --lines 100
+            Check PostgreSQL connectivity: psql -h 192.168.1.100 -p 7432 -U hypereels -c 'SELECT 1'
+
+      - alert: HypeReelsJobFailureRateHigh
+        expr: >
+          rate(hypereel_jobs_completed_total{status="failed"}[10m])
+          /
+          rate(hypereel_jobs_completed_total[10m])
+          > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "HypeReels job failure rate is above 10% ({{ $labels.queue }})"
+          description: >
+            Queue {{ $labels.queue }} is failing {{ $value | humanizePercentage }} of jobs.
+            Check the cleanup_failures table:
+            psql -h 192.168.1.137 -U hypereels -c "SELECT * FROM cleanup_failures WHERE resolved_at IS NULL;"
+
+      # ── PostgreSQL ──────────────────────────────────────────────────────────
+
+      - alert: HypeReelsPostgresConnectionsHigh
+        expr: pg_stat_activity_count{datname="hypereels"} > 80
+        for: 5m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "HypeReels PostgreSQL connection count is high ({{ $value }})"
+          description: >
+            PostgreSQL has {{ $value }} active connections (threshold: 80).
+            max_connections is set to 100. Connection pool exhaustion will cause
+            API errors.
+            Check active queries:
+            psql -h 192.168.1.100 -p 7432 -U hypereels -c "SELECT count(*), state FROM pg_stat_activity WHERE datname='hypereels' GROUP BY state;"
+
+      # ── MinIO Storage ───────────────────────────────────────────────────────
+
+      - alert: HypeReelsMinIOStorageHigh
+        expr: >
+          minio_bucket_usage_total_bytes{bucket="hypereels"}
+          > (899 * 1024 * 1024 * 1024 * 0.80)
+        for: 10m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "HypeReels MinIO bucket is above 80% capacity"
+          description: >
+            The hypereels bucket is using {{ $value | humanize1024 }}B of 899 GB (threshold: 80%).
+            This may indicate the ILM lifecycle rule or Cleanup Worker are not running.
+            Check ILM: mc ilm rule ls local/hypereels
+            Check cleanup_failures: psql -h 192.168.1.100 -p 7432 -U hypereels -c "SELECT count(*) FROM cleanup_failures WHERE resolved_at IS NULL;"
+            List large objects: mc ls --recursive local/hypereels | sort -k3 -n -r | head -20
+
+      - alert: HypeReelsBucketGrowthAnomaly
+        expr: >
+          increase(minio_bucket_usage_total_bytes{bucket="hypereels"}[1h])
+          > (50 * 1024 * 1024 * 1024)
+        labels:
+          severity: critical
+          service: hypereels
+        annotations:
+          summary: "HypeReels MinIO bucket grew more than 50 GB in the last hour"
+          description: >
+            The bucket grew {{ $value | humanize1024 }}B in 1 hour. This is anomalous
+            and likely indicates the Cleanup Worker or ILM lifecycle rule has failed.
+            Immediate operator action required to prevent storage exhaustion.
+            Check: mc du local/hypereels
+            Check cleanup_failures: psql -h 192.168.1.137 -U hypereels -c "SELECT * FROM cleanup_failures WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT 20;"
+
+      # ── Session Cleanup ─────────────────────────────────────────────────────
+
+      - alert: HypeReelsSessionCleanupStale
+        expr: >
+          time() - hypereel_last_cleanup_run_timestamp > (25 * 3600)
+        for: 0m
+        labels:
+          severity: warning
+          service: hypereels
+        annotations:
+          summary: "HypeReels session cleanup has not run in more than 25 hours"
+          description: >
+            The BullMQ stale-session purge job has not run in over 25 hours
+            (expected: every 60 minutes).
+            This means sessions idle for 24+ hours may not be cleaned up,
+            and MinIO objects may accumulate beyond the 48-hour ILM safety net.
+            Check the API process: pct exec 113 -- pm2 status
+            Check BullMQ repeatable jobs in Redis:
+            redis-cli -h 192.168.1.137 -a '<REDIS_PASSWORD>' KEYS "bull:*repeat*"
+
+      # ── Worker Availability ─────────────────────────────────────────────────
+
+      - alert: HypeReelsWorkersDown
+        expr: >
+          up{job="hypereels-workers"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: hypereels
+        annotations:
+          summary: "HypeReels Python workers are unreachable on Quorra"
+          description: >
+            The Python worker health endpoint at 192.168.1.100:8000/health
+            is not responding. Any queued jobs will wait until workers come back.
+            Check on Quorra:
+            docker ps --filter name=hypereels
+            docker logs hypereels-worker-detection

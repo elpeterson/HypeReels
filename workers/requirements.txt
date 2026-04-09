@@ -1,0 +1,42 @@
+# HypeReels Python Worker Dependencies
+# Python 3.12+
+
+# ── HTTP server (FastAPI) ─────────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# Audio analysis
+librosa==0.10.2
+soundfile==0.12.1
+numpy==1.26.4
+scipy==1.13.0
+
+# Video / image processing
+opencv-python-headless==4.9.0.80
+ffmpeg-python==0.2.0
+
+# AWS (Rekognition + S3-compatible R2)
+boto3==1.34.84
+botocore==1.34.84
+
+# Redis / BullMQ-compatible job consumption
+redis==5.0.3
+
+# Database
+psycopg2-binary==2.9.9
+
+# HTTP client (presigned URL download in main.py + analyse_audio / detect_persons)
+httpx==0.27.0
+
+# Configuration
+python-dotenv==1.0.1
+
+# Structured logging
+structlog==24.1.0
+
+# Data validation / modelling (already a FastAPI dependency, pinned for consistency)
+pydantic==2.7.1
+
+# Utilities
+tenacity==8.2.3       # retry logic
+python-ulid==2.2.0    # compact IDs for tmp filenames
