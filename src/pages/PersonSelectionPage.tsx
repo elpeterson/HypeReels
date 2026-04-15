@@ -31,11 +31,13 @@ export function PersonSelectionPage() {
   const [phase, setPhase] = useState<DetectionPhase>('idle')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [personSkipped, setPersonSkipped] = useState(false)
 
   const validClips = clips.filter((c) => c.status === 'valid')
   const clipsNeedingDetection = validClips.filter((c) => c.detectionStatus === 'pending')
   const allComplete = validClips.length > 0 && validClips.every((c) => c.detectionStatus === 'complete' || c.detectionStatus === 'failed')
-  const canContinue = !!selectedPersonRefId
+  // Continue is allowed when: person is selected, skip was explicitly clicked, or no persons were detected
+  const canContinue = !!selectedPersonRefId || personSkipped || personGroups.length === 0
 
   // Kick off detection if clips haven't been processed yet
   useEffect(() => {
@@ -117,6 +119,7 @@ export function PersonSelectionPage() {
     if (!sessionId) return
     const newSelection = selectedPersonRefId === personRefId ? null : personRefId
     setSelectedPerson(newSelection)
+    if (newSelection) setPersonSkipped(false)
     setSaving(true)
     try {
       await setPersonOfInterest(sessionId, newSelection)
@@ -126,6 +129,16 @@ export function PersonSelectionPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  const handleSkip = async () => {
+    if (!sessionId) return
+    setSelectedPerson(null)
+    setPersonSkipped(true)
+    // Best-effort server clear
+    try {
+      await setPersonOfInterest(sessionId, null)
+    } catch {/* ignore */}
   }
 
   const handleBack = () => {
@@ -219,7 +232,7 @@ export function PersonSelectionPage() {
       )}
 
       {/* Navigation */}
-      <div className="flex justify-between pt-2">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
         <button
           type="button"
           onClick={handleBack}
@@ -227,16 +240,28 @@ export function PersonSelectionPage() {
         >
           Back
         </button>
-        <button
-          type="button"
-          onClick={handleContinue}
-          disabled={isDetecting || (!canContinue && personGroups.length > 0)}
-          className="rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
-        >
-          {canContinue || personGroups.length === 0
-            ? 'Continue to Highlights'
-            : 'Select a person to continue'}
-        </button>
+
+        <div className="flex items-center gap-3">
+          {/* Skip button — visible when persons are detected but none selected and not already skipped */}
+          {phase === 'done' && personGroups.length > 0 && !selectedPersonRefId && !personSkipped && (
+            <button
+              type="button"
+              onClick={handleSkip}
+              className="rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-sm font-semibold text-gray-600 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
+            >
+              Skip — let AI choose freely
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={handleContinue}
+            disabled={isDetecting || !canContinue}
+            className="rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+          >
+            Continue to Highlights
+          </button>
+        </div>
       </div>
     </div>
   )

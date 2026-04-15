@@ -1,11 +1,14 @@
-import { useRef, useCallback } from 'react'
+import { useRef, useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Music, UploadCloud, X, AlertCircle, Loader2, CheckCircle2 } from 'lucide-react'
 import { useSessionStore } from '@/store'
 import { uploadAudio, deleteAudio } from '@/api/audio'
 import { ApiError } from '@/api/client'
+import { connectSSE } from '@/lib/sse'
 import { WaveformDisplay } from '@/components/WaveformDisplay'
+import { EphemeralWarningBanner } from '@/components/EphemeralWarningBanner'
 import { cn, formatMs, formatBytes } from '@/lib/utils'
+import type { SSEAudioAnalysed, SSEAudioAnalysisFailed } from '@/types'
 
 const ACCEPTED_MIME = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/ogg', 'audio/flac']
 const ACCEPTED_EXT = ['.mp3', '.m4a', '.wav', '.aac', '.ogg', '.flac']
@@ -34,9 +37,12 @@ export function UploadSongPage() {
     updateAudioProgress,
     finaliseAudioUpload,
     failAudioUpload,
+    updateAudioFromSSE,
     clearAudio,
     setCurrentStep,
   } = useSessionStore()
+
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
 
   const isUploading = audio?.status === 'uploading'
   const isValidating = audio?.status === 'validating'
@@ -44,6 +50,34 @@ export function UploadSongPage() {
   const isReady = audio?.status === 'valid' && audio?.analysisStatus === 'complete'
   const hasError = audio?.status === 'invalid' || audio?.uploadError !== null
   const canContinue = audio?.status === 'valid'
+
+  // SSE subscription — listens for audio analysis events
+  useEffect(() => {
+    if (!sessionId || !token) return
+    // Only subscribe when there is an audio track that could be analysed
+    if (!audio || (audio.analysisStatus !== 'pending' && audio.analysisStatus !== 'processing')) return
+
+    const sse = connectSSE(sessionId, token, (event) => {
+      if (event.type === 'audio-analysed') {
+        const e = event as SSEAudioAnalysed
+        updateAudioFromSSE({
+          analysisStatus: 'complete',
+          bpm: e.bpm,
+          waveformUrl: e.waveform_url,
+          envelope: e.envelope,
+        })
+        setAnalysisError(null)
+      }
+      if (event.type === 'audio-analysis-failed') {
+        const e = event as SSEAudioAnalysisFailed
+        updateAudioFromSSE({ analysisStatus: 'failed' })
+        setAnalysisError(e.error ?? 'Beat analysis failed. Please try again.')
+      }
+    })
+
+    return () => sse.disconnect()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, token, audio?.id, audio?.analysisStatus])
 
   const handleFile = useCallback(
     async (file: File) => {
@@ -133,6 +167,8 @@ export function UploadSongPage() {
         </p>
       </div>
 
+      <EphemeralWarningBanner />
+
       {/* Current audio track */}
       {audio ? (
         <div
@@ -192,7 +228,7 @@ export function UploadSongPage() {
               {isReady && (
                 <p className="mt-1 flex items-center gap-1 text-xs text-green-600">
                   <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-                  Ready
+                  Beat structure analysed
                 </p>
               )}
               {hasError && (
@@ -200,6 +236,19 @@ export function UploadSongPage() {
                   <AlertCircle className="h-3 w-3" aria-hidden="true" />
                   {audio.uploadError ?? (audio.status === 'invalid' ? 'Validation failed. Please check the file.' : 'Unknown error')}
                 </p>
+              )}
+              {analysisError && !hasError && (
+                <div className="mt-1 flex items-center gap-2 text-xs text-red-600">
+                  <AlertCircle className="h-3 w-3 flex-shrink-0" aria-hidden="true" />
+                  <span>{analysisError}</span>
+                  <button
+                    type="button"
+                    onClick={handleRemove}
+                    className="ml-1 underline hover:no-underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-500"
+                  >
+                    Retry
+                  </button>
+                </div>
               )}
 
               {/* Waveform */}

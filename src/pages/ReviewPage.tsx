@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { CheckCircle2, User, Music, Film, Layers, AlertTriangle } from 'lucide-react'
+import { CheckCircle2, User, Music, Film, Layers, AlertTriangle, Pencil } from 'lucide-react'
 import { useSessionStore } from '@/store'
 import { ClipCard } from '@/components/ClipCard'
 import { WaveformDisplay } from '@/components/WaveformDisplay'
@@ -29,11 +29,12 @@ export function ReviewPage() {
   const issues: string[] = []
   if (validClips.length === 0) issues.push('No valid clips available.')
   if (!audio || audio.status !== 'valid') issues.push('No valid audio track.')
-  if (persons.length > 0 && !selectedPersonRefId) {
-    issues.push('No person of interest selected.')
-  }
+  // NOTE: Intentionally NOT blocking generation when no person is selected.
+  // STORY-008/009 both permit generation without a person of interest.
 
   const canGenerate = issues.length === 0
+  // Show an amber advisory (non-blocking) when persons were detected but none selected
+  const showNoPersonWarning = persons.length > 0 && !selectedPersonRefId
 
   const handleBack = () => {
     setCurrentStep('mark-highlights')
@@ -56,7 +57,7 @@ export function ReviewPage() {
 
       <EphemeralWarningBanner />
 
-      {/* Issues list */}
+      {/* Blocking issues list */}
       {issues.length > 0 && (
         <div
           role="alert"
@@ -68,6 +69,19 @@ export function ReviewPage() {
               {issue}
             </p>
           ))}
+        </div>
+      )}
+
+      {/* Non-blocking advisory: no person selected */}
+      {showNoPersonWarning && (
+        <div
+          role="note"
+          className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800"
+        >
+          <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-500" aria-hidden="true" />
+          <p>
+            No person of interest selected — the AI will choose the best moments from all detected people.
+          </p>
         </div>
       )}
 
@@ -162,23 +176,70 @@ export function ReviewPage() {
         )}
       </section>
 
-      {/* Highlights summary */}
-      {highlights.length > 0 && (
+      {/* Highlights section — always shown when there are valid clips */}
+      {validClips.length > 0 && (
         <section aria-labelledby="review-highlights-heading">
-          <div className="flex items-center gap-2 mb-2">
+          <div className="flex items-center gap-2 mb-3">
             <Layers className="h-5 w-5 text-brand-500" aria-hidden="true" />
             <h2 id="review-highlights-heading" className="text-base font-semibold text-gray-800">
               Highlights
             </h2>
+            {highlights.length > 0 && (
+              <span className="rounded-full border border-brand-200 bg-brand-50 px-2.5 py-0.5 text-xs font-medium text-brand-700">
+                {highlights.length} segment{highlights.length !== 1 ? 's' : ''}
+              </span>
+            )}
+            {highlights.length > 0 && (
+              <span className="rounded-full border border-gray-200 bg-gray-50 px-2.5 py-0.5 text-xs text-gray-600">
+                Total: {formatMs(totalHighlightDurationMs)}
+              </span>
+            )}
           </div>
-          <div className="flex flex-wrap gap-2 text-sm">
-            <span className="rounded-full border border-brand-200 bg-brand-50 px-3 py-1 text-brand-700">
-              {highlights.length} highlight segment{highlights.length !== 1 ? 's' : ''} defined
-            </span>
-            <span className="rounded-full border border-gray-200 bg-gray-50 px-3 py-1 text-gray-600">
-              Total: {formatMs(totalHighlightDurationMs)}
-            </span>
-          </div>
+
+          <ul className="flex flex-col gap-2" aria-label="Highlight breakdown by clip">
+            {validClips.map((clip) => {
+              const clipHighlights = highlights.filter((h) => h.clipId === clip.id)
+              return (
+                <li
+                  key={clip.id}
+                  className="rounded-xl border border-gray-200 bg-white p-3 shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="truncate text-sm font-medium text-gray-800" title={clip.originalFilename}>
+                      {clip.originalFilename}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setCurrentStep('mark-highlights')
+                        navigate('/highlights')
+                      }}
+                      className="flex flex-shrink-0 items-center gap-1 text-xs text-brand-600 underline hover:no-underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-brand-600"
+                      aria-label={`Edit highlights for ${clip.originalFilename}`}
+                    >
+                      <Pencil className="h-3 w-3" aria-hidden="true" />
+                      Edit
+                    </button>
+                  </div>
+
+                  {clipHighlights.length > 0 ? (
+                    <ul className="mt-1.5 flex flex-col gap-1" aria-label={`Highlights for ${clip.originalFilename}`}>
+                      {clipHighlights.map((h, i) => (
+                        <li key={h.id || i} className="font-mono text-xs text-brand-700">
+                          {formatMs(h.startMs, true)} – {formatMs(h.endMs, true)}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="mt-1 text-xs text-gray-400 italic">
+                      No highlights — AI will choose
+                    </p>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+
           {totalExceedsSong && audioDurationMs !== null && (
             <p className="mt-2 flex items-center gap-1.5 text-xs text-amber-700">
               <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />

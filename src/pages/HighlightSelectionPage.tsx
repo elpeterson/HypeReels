@@ -6,6 +6,7 @@ import { putHighlights } from '@/api/clips'
 import { ApiError } from '@/api/client'
 import { VideoScrubber } from '@/components/VideoScrubber'
 import { ClipCard } from '@/components/ClipCard'
+import { EphemeralWarningBanner } from '@/components/EphemeralWarningBanner'
 import { cn, formatMs } from '@/lib/utils'
 
 export function HighlightSelectionPage() {
@@ -79,6 +80,8 @@ export function HighlightSelectionPage() {
           Unmarked portions are handled by the AI.
         </p>
       </div>
+
+      <EphemeralWarningBanner />
 
       {/* Duration warning */}
       {totalExceedsSong && audioDurationMs !== null && (

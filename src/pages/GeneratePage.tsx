@@ -1,16 +1,29 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertCircle, RefreshCw } from 'lucide-react'
+import { AlertCircle, CheckCircle2, Loader2, RefreshCw } from 'lucide-react'
 import { useSessionStore } from '@/store'
 import { startGeneration, getJobStatus, cancelJob } from '@/api/generation'
 import { ApiError } from '@/api/client'
 import { connectSSE, type SSEClient } from '@/lib/sse'
 import { JobProgressBar } from '@/components/JobProgressBar'
-import type { SSEGenerationProgress, SSEGenerationComplete, SSEGenerationFailed } from '@/types'
+import { cn } from '@/lib/utils'
+import type { GenerationStep, SSEGenerationProgress, SSEGenerationComplete, SSEGenerationFailed } from '@/types'
 
 const POLL_INTERVAL_MS = 5000
 
 type BootstrapPhase = 'starting' | 'running' | 'complete' | 'failed'
+
+interface GenerationStepDef {
+  key: GenerationStep
+  label: string
+}
+
+const GENERATION_STEPS: GenerationStepDef[] = [
+  { key: 'analysing', label: 'Analysing clips and detecting persons' },
+  { key: 'selecting', label: 'Selecting your best moments' },
+  { key: 'sequencing', label: 'Syncing cuts to the beat' },
+  { key: 'rendering', label: 'Encoding your HypeReel' },
+]
 
 export function GeneratePage() {
   const navigate = useNavigate()
@@ -28,6 +41,7 @@ export function GeneratePage() {
 
   const [phase, setPhase] = useState<BootstrapPhase>('starting')
   const [initError, setInitError] = useState<string | null>(null)
+  const [isCancelling, setIsCancelling] = useState(false)
   const sseRef = useRef<SSEClient | null>(null)
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -130,7 +144,11 @@ export function GeneratePage() {
         setupRealtime(job_id)
       } catch (err: unknown) {
         if (cancelled) return
-        const message = err instanceof ApiError ? err.message : 'Failed to start generation'
+        // STORY-013: 409 means a job is already active (e.g. double-submit)
+        const is409 = err instanceof ApiError && err.status === 409
+        const message = is409
+          ? 'A generation is already in progress. Please wait or go back and try again.'
+          : err instanceof ApiError ? err.message : 'Failed to start generation'
         setInitError(message)
         setPhase('failed')
       }
@@ -170,7 +188,21 @@ export function GeneratePage() {
     }
   }
 
-  const handleBack = () => {
+  const handleBack = async () => {
+    if (!sessionId || !generationJob) {
+      setCurrentStep('review')
+      navigate('/review')
+      return
+    }
+
+    setIsCancelling(true)
+    const CANCEL_TIMEOUT_MS = 3000
+    const cancelPromise = cancelJob(sessionId, generationJob.id).catch(() => {/* best-effort */})
+    const timeoutPromise = new Promise<void>((resolve) => setTimeout(resolve, CANCEL_TIMEOUT_MS))
+
+    await Promise.race([cancelPromise, timeoutPromise])
+
+    setIsCancelling(false)
     setCurrentStep('review')
     navigate('/review')
   }
@@ -204,6 +236,40 @@ export function GeneratePage() {
         </div>
       )}
 
+      {/* Generation steps list — shown during queued/processing */}
+      {isActive && (
+        <ol className="w-full max-w-lg space-y-2" aria-label="Generation steps">
+          {GENERATION_STEPS.map(({ key, label }) => {
+            const currentStepIndex = GENERATION_STEPS.findIndex(
+              (s) => s.key === generationJob?.step
+            )
+            const thisStepIndex = GENERATION_STEPS.findIndex((s) => s.key === key)
+            const isCurrent = generationJob?.step === key
+            const isDone = currentStepIndex >= 0 && thisStepIndex < currentStepIndex
+            const isFuture = !isCurrent && !isDone
+
+            return (
+              <li
+                key={key}
+                className={cn(
+                  'flex items-center gap-3 rounded-lg px-4 py-2.5 text-sm',
+                  isCurrent && 'bg-brand-50 font-semibold text-brand-700',
+                  isDone && 'text-green-700',
+                  isFuture && 'text-gray-400'
+                )}
+              >
+                <span className="flex-shrink-0 w-5 text-center">
+                  {isDone && <CheckCircle2 className="h-4 w-4 text-green-500" aria-hidden="true" />}
+                  {isCurrent && <Loader2 className="h-4 w-4 animate-spin text-brand-500" aria-hidden="true" />}
+                  {isFuture && <span className="inline-block h-4 w-4 rounded-full border border-gray-300" aria-hidden="true" />}
+                </span>
+                {label}
+              </li>
+            )
+          })}
+        </ol>
+      )}
+
       {/* Failure state */}
       {phase === 'failed' && (
         <div className="flex w-full max-w-lg flex-col items-center gap-4">
@@ -222,9 +288,17 @@ export function GeneratePage() {
             <button
               type="button"
               onClick={handleBack}
-              className="rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
+              disabled={isCancelling}
+              className="flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-5 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
             >
-              Back to Review
+              {isCancelling ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Cancelling…
+                </>
+              ) : (
+                'Back to Review'
+              )}
             </button>
             <button
               type="button"
