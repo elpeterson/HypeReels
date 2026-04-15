@@ -447,7 +447,7 @@ paths:
       security: [{ SessionToken: [] }]
       description: |
         Replaces any previously uploaded audio track for the session.
-        Supported: MP3, WAV, AAC, OGG (max 500 MB).
+        Supported: MP3, WAV, AAC, OGG, FLAC (max 500 MB).
         Returns 202 immediately; validation + audio-analysis jobs are queued.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }

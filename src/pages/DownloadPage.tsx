@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Download, Trash2, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react'
+import { Download, Trash2, CheckCircle2, AlertCircle, Loader2, RefreshCw } from 'lucide-react'
 import { useSessionStore } from '@/store'
 import { notifyDownloadInitiated, notifyDone } from '@/api/generation'
+import { getSessionState } from '@/api/sessions'
 import { ApiError } from '@/api/client'
 import { formatMs, formatBytes } from '@/lib/utils'
 
@@ -16,11 +17,16 @@ export function DownloadPage() {
     generationJob,
     clearSession,
     setCurrentStep,
+    setGenerationJob,
   } = useSessionStore()
+
+  const downloadFilename = sessionId ? `hypereel-${sessionId.slice(0, 8)}.mp4` : 'hypereel.mp4'
 
   const [phase, setPhase] = useState<DownloadPhase>('ready')
   const [error, setError] = useState<string | null>(null)
   const [showConfirm, setShowConfirm] = useState(false)
+  const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [isRefreshingUrl, setIsRefreshingUrl] = useState(false)
 
   const downloadUrl = generationJob?.downloadUrl ?? null
   const durationMs = generationJob?.durationMs ?? null
@@ -52,6 +58,7 @@ export function DownloadPage() {
     if (!sessionId || !downloadUrl) return
     setPhase('downloading')
     setError(null)
+    setDownloadError(null)
 
     try {
       // Notify backend that download is starting (schedules cleanup)
@@ -60,16 +67,45 @@ export function DownloadPage() {
       // Non-fatal — the download itself is more important
     }
 
+    // Verify the presigned URL is reachable before triggering the browser download
+    try {
+      const probe = await fetch(downloadUrl, { method: 'HEAD' })
+      if (!probe.ok) {
+        throw new Error(`Status ${probe.status}`)
+      }
+    } catch {
+      setDownloadError('Your download link has expired.')
+      setPhase('ready')
+      return
+    }
+
     // Trigger browser download via a temporary <a> element
     const a = document.createElement('a')
     a.href = downloadUrl
-    a.download = 'HypeReel.mp4'
+    a.download = downloadFilename
     document.body.appendChild(a)
     a.click()
     document.body.removeChild(a)
 
     setPhase('confirming')
     setShowConfirm(true)
+  }
+
+  const handleRefreshUrl = async () => {
+    if (!sessionId) return
+    setIsRefreshingUrl(true)
+    setDownloadError(null)
+    try {
+      const state = await getSessionState(sessionId)
+      if (state.generation_job) {
+        setGenerationJob(state.generation_job)
+      }
+      setDownloadError(null)
+    } catch {
+      setDownloadError('Could not refresh the download link. Please try again.')
+    } finally {
+      setIsRefreshingUrl(false)
+    }
   }
 
   const handleConfirmDone = async () => {
@@ -135,7 +171,7 @@ export function DownloadPage() {
         </div>
 
         <div className="text-center space-y-1">
-          <p className="text-base font-semibold text-gray-800">HypeReel.mp4</p>
+          <p className="text-base font-semibold text-gray-800">{downloadFilename}</p>
           <div className="flex justify-center gap-3 text-xs text-gray-500">
             {durationMs !== null && <span>{formatMs(durationMs)}</span>}
             {sizeBytes !== null && <span>{formatBytes(sizeBytes)}</span>}

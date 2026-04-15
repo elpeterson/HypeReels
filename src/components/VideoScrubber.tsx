@@ -1,14 +1,11 @@
-import { useState, useRef, useCallback, useId } from 'react'
+import { useState, useRef, useCallback, useId, useEffect } from 'react'
 import { Plus, Trash2, AlertCircle } from 'lucide-react'
 import { cn, formatMs, parseTimestamp, clamp, mergeHighlightRanges } from '@/lib/utils'
 import type { Highlight } from '@/types'
 
 const MIN_HIGHLIGHT_MS = 1000
 
-interface PendingRange {
-  startMs: number
-  endMs: number
-}
+type DraggingHandle = 'start' | 'end' | null
 
 interface VideoScrubberProps {
   clipId: string
@@ -31,9 +28,66 @@ export function VideoScrubber({
   const [validationError, setValidationError] = useState<string | null>(null)
   const [startInput, setStartInput] = useState('')
   const [endInput, setEndInput] = useState('')
+  const [draggingHandle, setDraggingHandle] = useState<DraggingHandle>(null)
   const trackRef = useRef<HTMLDivElement>(null)
   const startId = useId()
   const endId = useId()
+
+  // Convert a clientX position to a clamped millisecond value using the track bounding rect
+  const msFromClientX = useCallback(
+    (clientX: number): number => {
+      if (!trackRef.current) return 0
+      const rect = trackRef.current.getBoundingClientRect()
+      const pct = (clientX - rect.left) / rect.width
+      return clamp(Math.round(pct * durationMs), 0, durationMs)
+    },
+    [durationMs]
+  )
+
+  // Attach / detach window-level drag listeners
+  useEffect(() => {
+    if (!draggingHandle) return
+
+    const onMouseMove = (e: MouseEvent) => {
+      const ms = msFromClientX(e.clientX)
+      if (draggingHandle === 'start') {
+        setPendingStart(clamp(ms, 0, pendingEnd - MIN_HIGHLIGHT_MS))
+        setStartInput('')
+      } else {
+        setPendingEnd(clamp(ms, pendingStart + MIN_HIGHLIGHT_MS, durationMs))
+        setEndInput('')
+      }
+    }
+
+    const onMouseUp = () => setDraggingHandle(null)
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!e.touches[0]) return
+      e.preventDefault()
+      const ms = msFromClientX(e.touches[0].clientX)
+      if (draggingHandle === 'start') {
+        setPendingStart(clamp(ms, 0, pendingEnd - MIN_HIGHLIGHT_MS))
+        setStartInput('')
+      } else {
+        setPendingEnd(clamp(ms, pendingStart + MIN_HIGHLIGHT_MS, durationMs))
+        setEndInput('')
+      }
+    }
+
+    const onTouchEnd = () => setDraggingHandle(null)
+
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    window.addEventListener('touchend', onTouchEnd)
+
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('touchmove', onTouchMove)
+      window.removeEventListener('touchend', onTouchEnd)
+    }
+  }, [draggingHandle, msFromClientX, pendingStart, pendingEnd, durationMs])
 
   const pct = useCallback(
     (ms: number) => (ms / durationMs) * 100,
@@ -162,14 +216,27 @@ export function VideoScrubber({
           {/* Pending start handle */}
           {!isReadOnly && (
             <div
-              className="absolute top-0 h-full w-1 bg-brand-600 cursor-ew-resize"
-              style={{ left: `${pct(pendingStart)}%` }}
+              className={cn(
+                'absolute top-0 h-full w-2 cursor-ew-resize rounded-sm transition-colors',
+                draggingHandle === 'start'
+                  ? 'bg-brand-800 scale-x-150'
+                  : 'bg-brand-600 hover:bg-brand-700'
+              )}
+              style={{ left: `${pct(pendingStart)}%`, transform: 'translateX(-50%)' }}
               role="slider"
               aria-label="Highlight start"
               aria-valuemin={0}
               aria-valuemax={durationMs}
               aria-valuenow={pendingStart}
               tabIndex={0}
+              onMouseDown={(e) => {
+                e.preventDefault()
+                setDraggingHandle('start')
+              }}
+              onTouchStart={(e) => {
+                e.preventDefault()
+                setDraggingHandle('start')
+              }}
               onKeyDown={(e) => {
                 const step = 1000
                 if (e.key === 'ArrowLeft') setPendingStart((v) => clamp(v - step, 0, pendingEnd - MIN_HIGHLIGHT_MS))
@@ -181,14 +248,27 @@ export function VideoScrubber({
           {/* Pending end handle */}
           {!isReadOnly && (
             <div
-              className="absolute top-0 h-full w-1 bg-brand-600 cursor-ew-resize"
-              style={{ left: `${pct(pendingEnd)}%` }}
+              className={cn(
+                'absolute top-0 h-full w-2 cursor-ew-resize rounded-sm transition-colors',
+                draggingHandle === 'end'
+                  ? 'bg-brand-800 scale-x-150'
+                  : 'bg-brand-600 hover:bg-brand-700'
+              )}
+              style={{ left: `${pct(pendingEnd)}%`, transform: 'translateX(-50%)' }}
               role="slider"
               aria-label="Highlight end"
               aria-valuemin={0}
               aria-valuemax={durationMs}
               aria-valuenow={pendingEnd}
               tabIndex={0}
+              onMouseDown={(e) => {
+                e.preventDefault()
+                setDraggingHandle('end')
+              }}
+              onTouchStart={(e) => {
+                e.preventDefault()
+                setDraggingHandle('end')
+              }}
               onKeyDown={(e) => {
                 const step = 1000
                 if (e.key === 'ArrowLeft') setPendingEnd((v) => clamp(v - step, pendingStart + MIN_HIGHLIGHT_MS, durationMs))

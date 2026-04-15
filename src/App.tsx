@@ -1,15 +1,16 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   BrowserRouter,
   Routes,
   Route,
   Navigate,
   useNavigate,
+  useLocation,
 } from 'react-router-dom'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { StepProgressBar } from '@/components/StepProgressBar'
 import { useSessionStore } from '@/store'
-import { createSession, getSessionState } from '@/api/sessions'
+import { createSession, getSessionState, deleteSession } from '@/api/sessions'
 import { setAuthToken, ApiError } from '@/api/client'
 import type { Step } from '@/types'
 import {
@@ -202,9 +203,35 @@ function SessionBootstrapper({ children }: { children: ReactNode }) {
 // ─── Shell with step progress bar ────────────────────────────────────────────
 
 function AppShell({ children }: { children: ReactNode }) {
+  const navigate = useNavigate()
+  const location = useLocation()
   const currentStep = useSessionStore((s) => s.currentStep)
   const sessionStatus = useSessionStore((s) => s.sessionStatus)
+  const sessionId = useSessionStore((s) => s.sessionId)
+  const clearSession = useSessionStore((s) => s.clearSession)
   const isLocked = sessionStatus === 'locked' || sessionStatus === 'complete'
+
+  const [showStartOverConfirm, setShowStartOverConfirm] = useState(false)
+  const [isStartingOver, setIsStartingOver] = useState(false)
+
+  const isDownloadPage = location.pathname === '/download'
+
+  const handleStartOverConfirm = async () => {
+    setIsStartingOver(true)
+    if (sessionId) {
+      try {
+        await deleteSession(sessionId)
+      } catch {
+        // Best-effort — clear client state regardless
+      }
+    }
+    clearSession()
+    setShowStartOverConfirm(false)
+    setIsStartingOver(false)
+    navigate('/', { replace: true })
+    // Reload to trigger SessionBootstrapper to create a new session
+    window.location.replace('/')
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-gray-50">
@@ -215,6 +242,15 @@ function AppShell({ children }: { children: ReactNode }) {
               <span className="text-lg font-bold tracking-tight text-brand-700">
                 HypeReels
               </span>
+              {!isDownloadPage && sessionId && (
+                <button
+                  type="button"
+                  onClick={() => setShowStartOverConfirm(true)}
+                  className="text-xs text-gray-400 underline hover:text-gray-600 hover:no-underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
+                >
+                  Start Over
+                </button>
+              )}
             </div>
             <StepProgressBar currentStep={currentStep} isLocked={isLocked} />
           </div>
@@ -224,6 +260,43 @@ function AppShell({ children }: { children: ReactNode }) {
       <main className="mx-auto w-full max-w-5xl flex-1 px-4 py-8">
         {children}
       </main>
+
+      {/* Start Over confirmation dialog */}
+      {showStartOverConfirm && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="start-over-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
+            <h2 id="start-over-title" className="text-base font-semibold text-gray-900">
+              Start Over?
+            </h2>
+            <p className="mt-2 text-sm text-gray-600">
+              This will permanently delete all your uploaded clips and audio. Are you sure?
+            </p>
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={() => setShowStartOverConfirm(false)}
+                disabled={isStartingOver}
+                className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleStartOverConfirm}
+                disabled={isStartingOver}
+                className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+              >
+                {isStartingOver ? 'Deleting…' : 'Yes, Delete Everything'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
