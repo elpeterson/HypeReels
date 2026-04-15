@@ -150,24 +150,58 @@ npm install -g pm2
 # Install ffmpeg (required by validation worker)
 apt-get install -y ffmpeg
 
+# Install postgresql-client (required to run DB migrations from CT 113)
+apt-get install -y postgresql-client
+
+# Install iptables-persistent (required for firewall rules below)
+apt-get install -y iptables-persistent
+
 # Create app user and directory
 useradd -r -s /bin/bash -m -d /opt/hypereels hypereels
 mkdir -p /opt/hypereels/app
 chown hypereels:hypereels /opt/hypereels/app
 
-# Clone repo (as operator — adjust remote URL to match your repo)
-# git clone https://github.com/<org>/hypereels.git /opt/hypereels/app
-# cd /opt/hypereels/app/server && npm ci --omit=dev
+# Clone repo (adjust remote URL to match your repo)
+git clone https://github.com/<org>/hypereels.git /opt/hypereels/app
+chown -R hypereels:hypereels /opt/hypereels/app
 
-# Copy production .env
-# cp /opt/hypereels/app/.env.production /opt/hypereels/app/.env
+# Install dependencies and build TypeScript → dist/
+cd /opt/hypereels/app/server
+npm ci --omit=dev
+npm run build
 
-# Run DB migration (first boot only — idempotent)
-# node /opt/hypereels/app/server/dist/db/migrate.js
+# Create production .env (see Section 3 "API Server" for full contents)
+# Copy the block from Section 3 into /opt/hypereels/app/.env, then fill secrets
+nano /opt/hypereels/app/.env
+chmod 600 /opt/hypereels/app/.env
+chown hypereels:hypereels /opt/hypereels/app/.env
+
+# Run DB migrations (first boot only — all three are idempotent)
+# Requires PostgreSQL on Quorra to be healthy first (Step 1 of startup sequence)
+cd /opt/hypereels/app
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f server/src/db/migrations/001_initial_schema.sql
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f server/src/db/migrations/002_rename_r2_key_to_minio_key.sql
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f server/src/db/migrations/003_add_clip_validation.sql
+
+# Verify migrations applied cleanly
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -c "\dt"
 
 # Start with PM2
-# pm2 start /opt/hypereels/app/ecosystem.config.cjs
-# pm2 save
+pm2 start /opt/hypereels/app/ecosystem.config.cjs
+pm2 save
+
+# Restrict port 3001 to LAN-internal callers only (NPM on 192.168.1.123, Quorra on 192.168.1.100)
+# Allow loopback and the two permitted source IPs; drop everything else on 3001
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A INPUT -p tcp --dport 3001 -s 192.168.1.123 -j ACCEPT
+iptables -A INPUT -p tcp --dport 3001 -s 192.168.1.100 -j ACCEPT
+iptables -A INPUT -p tcp --dport 3001 -j DROP
+# Persist across reboots (iptables-persistent was installed above)
+netfilter-persistent save
 
 exit
 ```
@@ -251,9 +285,13 @@ docker exec -it hypereels-postgres psql -U hypereels -d hypereels <<'SQL'
 SELECT version();
 SQL
 
-# Apply schema from developer machine or CT 113:
-psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
-  -f /opt/hypereels/app/server/src/db/schema.sql
+# Apply schema from CT 113 (all three migration files, in order — see Section 3 for full command):
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f /opt/hypereels/app/server/src/db/migrations/001_initial_schema.sql
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f /opt/hypereels/app/server/src/db/migrations/002_rename_r2_key_to_minio_key.sql
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f /opt/hypereels/app/server/src/db/migrations/003_add_clip_validation.sql
 ```
 
 Connection string from all clients:
@@ -397,13 +435,30 @@ systemctl daemon-reload
 systemctl enable minio
 systemctl start minio
 
+# Wait for MinIO to become healthy before running mc commands
+echo "Waiting for MinIO to be ready..."
+until curl -sf http://192.168.1.138:9000/minio/health/live > /dev/null 2>&1; do
+  sleep 2
+done
+echo "MinIO is ready"
+
 # Configure bucket and lifecycle (run after MinIO is healthy)
-mc alias set local http://192.168.1.138:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+# Source env file to get $MINIO_ROOT_USER and $MINIO_ROOT_PASSWORD
+source /etc/minio/minio.env
+mc alias set local http://192.168.1.138:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
 mc mb local/hypereels
 mc ilm rule add local/hypereels --expire-days 2 --tags "session_ttl=true"
 
 # Verify ILM rule
 mc ilm rule ls local/hypereels
+
+# Health check (MinIO S3 API)
+curl -sf http://192.168.1.138:9000/minio/health/live && echo "MinIO API healthy"
+
+# Verify Console is accessible (HTTP 200 or 302)
+curl -sf -o /dev/null -w "%{http_code}" http://192.168.1.138:9001 | grep -qE "^(200|302)" \
+  && echo "MinIO Console (192.168.1.138:9001) accessible" \
+  || echo "WARNING: MinIO Console not responding on port 9001 — check MINIO_OPTS in minio.env"
 ```
 
 ---
@@ -420,14 +475,32 @@ Connection string:
 postgresql://hypereels:<PASSWORD>@192.168.1.100:7432/hypereels
 ```
 
-Apply schema on first boot:
+Apply schema on first boot (run from CT 113 or any host with `psql` access):
 
 ```bash
-psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
-  -f /opt/hypereels/app/server/src/db/schema.sql
+# All three migration files must be applied in order.
+# Each migration is idempotent — safe to re-run if a previous apply was interrupted.
+# Install postgresql-client on CT 113 if needed: apt-get install -y postgresql-client
+
+cd /opt/hypereels/app
+for f in \
+  server/src/db/migrations/001_initial_schema.sql \
+  server/src/db/migrations/002_rename_r2_key_to_minio_key.sql \
+  server/src/db/migrations/003_add_clip_validation.sql
+do
+  echo "Applying $f ..."
+  PGPASSWORD=<POSTGRES_PASSWORD> psql \
+    -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+    -f "$f"
+done
+
+# Verify tables exist
+PGPASSWORD=<POSTGRES_PASSWORD> psql \
+  -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -c "\dt"
 ```
 
-The schema migration is idempotent (uses `CREATE TABLE IF NOT EXISTS` and `CREATE INDEX IF NOT EXISTS`).
+All migrations use `IF NOT EXISTS` / `DO $$ ... IF NOT EXISTS` guards — safe to re-run on an existing database.
 
 Backup: `pg_dump` runs on Quorra (see Section 8). No `pct exec` is needed — `pg_dump` connects over `192.168.1.100:7432` from any host with psql access.
 
@@ -491,27 +564,67 @@ Presigned URL TTLs:
 Production `.env` at `/opt/hypereels/app/.env`:
 
 ```bash
-DATABASE_URL=postgresql://hypereels:<PASSWORD>@192.168.1.100:7432/hypereels
+# ── Database ──────────────────────────────────────────────────────────────────
+DATABASE_URL=postgresql://hypereels:<POSTGRES_PASSWORD>@192.168.1.100:7432/hypereels
 DATABASE_SSL=false
+
+# ── Redis ─────────────────────────────────────────────────────────────────────
 REDIS_URL=redis://:<REDIS_PASSWORD>@192.168.1.137:6379
+REDIS_PASSWORD=<REDIS_PASSWORD>
+
+# ── MinIO (CT 115, storage_1tb) ───────────────────────────────────────────────
+# Use a dedicated MinIO service account (least-privilege), not the root credentials
+MINIO_ENDPOINT=http://192.168.1.138:9000
+MINIO_ACCESS_KEY_ID=<MINIO_SERVICE_ACCOUNT_KEY>
+MINIO_SECRET_ACCESS_KEY=<MINIO_SERVICE_ACCOUNT_SECRET>
+MINIO_BUCKET=hypereels
+MINIO_PUBLIC_URL=http://192.168.1.138:9000/hypereels
+
+# Legacy R2_* aliases — kept for internal SDK compatibility; mirrors MINIO_* above
 R2_ENDPOINT=http://192.168.1.138:9000
-R2_ACCESS_KEY_ID=<MINIO_ACCESS_KEY>
-R2_SECRET_ACCESS_KEY=<MINIO_SECRET_KEY>
+R2_ACCESS_KEY_ID=<MINIO_SERVICE_ACCOUNT_KEY>
+R2_SECRET_ACCESS_KEY=<MINIO_SERVICE_ACCOUNT_SECRET>
 R2_BUCKET=hypereels
 R2_PUBLIC_URL=http://192.168.1.138:9000/hypereels
-METRICS_PATH=/metrics
-SESSION_TTL_HOURS=24
-CLEANUP_GRACE_PERIOD_MINUTES=5
+
+# ── API server ────────────────────────────────────────────────────────────────
 PORT=3001
 HOST=0.0.0.0
 NODE_ENV=production
 LOG_LEVEL=info
 CORS_ORIGIN=https://hypereels.thesquids.ink
+
+# ── Python workers (Quorra Docker, 192.168.1.100) ────────────────────────────
 PYTHON_WORKER_URL=http://192.168.1.100:8000
 PYTHON_TIMEOUT_MS=300000
+PYTHON_WORKER_AUDIO_TIMEOUT_MS=300000
+PYTHON_WORKER_ASSEMBLY_TIMEOUT_MS=900000
+
+# ── InsightFace ───────────────────────────────────────────────────────────────
+INSIGHTFACE_MODEL=buffalo_l
+INSIGHTFACE_COSINE_THRESHOLD=0.45
+
+# ── FFmpeg ────────────────────────────────────────────────────────────────────
+FFMPEG_CRF=20
+FFMPEG_PRESET=fast
+FFMPEG_MAX_WIDTH=1920
+
+# ── Session & upload limits ───────────────────────────────────────────────────
+SESSION_TTL_HOURS=24
+CLEANUP_GRACE_PERIOD_MINUTES=5
+MAX_CLIPS_PER_SESSION=10
+MAX_CLIP_DURATION_MS=300000
+MAX_CLIP_SIZE_BYTES=500000000
+MAX_AUDIO_DURATION_MS=600000
+GENERATION_TIMEOUT_MS=900000
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+METRICS_PATH=/metrics
 ```
 
 All secrets are stored only in this file. The file is owned by `hypereels:hypereels` and has mode `600`. Secrets are never committed to version control.
+
+> **Note on MinIO credentials:** The `MINIO_ACCESS_KEY_ID` / `R2_ACCESS_KEY_ID` here should be a dedicated MinIO service account (not the root credentials from `/etc/minio/minio.env` on CT 115). Create one via the MinIO Console at http://192.168.1.138:9001 → Identity → Service Accounts, with a read/write policy scoped to the `hypereels` bucket.
 
 Health check:
 
@@ -554,9 +667,14 @@ docker-compose -f docker-compose.workers.yml --env-file .env.workers up -d hyper
 sleep 10
 docker exec hypereels-postgres pg_isready -U hypereels -d hypereels
 
-# Apply schema (first boot only)
-psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
-  -f /path/to/server/src/db/schema.sql
+# Apply schema (first boot only — all three migration files in order)
+# Run from CT 113 after the repo is cloned to /opt/hypereels/app
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f /opt/hypereels/app/server/src/db/migrations/001_initial_schema.sql
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f /opt/hypereels/app/server/src/db/migrations/002_rename_r2_key_to_minio_key.sql
+PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
+  -f /opt/hypereels/app/server/src/db/migrations/003_add_clip_validation.sql
 
 # Build and start workers
 docker-compose -f docker-compose.workers.yml --env-file .env.workers up -d --build
@@ -688,7 +806,32 @@ The existing Prometheus and Grafana stack runs on Quorra. Add HypeReels as one s
 
 ### Add Prometheus Scrape Target
 
-Edit `/path/to/prometheus.yml` on Quorra (find the exact path with `docker inspect prometheus`):
+**Prerequisite — `--web.enable-lifecycle` flag:**
+The hot-reload endpoint (`POST /-/reload`) only works when Prometheus is started with the `--web.enable-lifecycle` flag. Verify this is already set on the existing Quorra Prometheus container:
+
+```bash
+# On Quorra — check if the flag is present
+docker inspect prometheus | grep -o -- '--web.enable-lifecycle'
+# Expected output: --web.enable-lifecycle
+# If missing, add the flag to the Prometheus container's command args in Unraid
+# (edit the container template in Unraid UI or docker-compose, then restart Prometheus).
+# TODO: operator must verify --web.enable-lifecycle is set on the existing Prometheus container
+```
+
+Find the exact path to Prometheus config and rules directories:
+
+```bash
+# On Quorra
+docker inspect prometheus | python3 -c "
+import sys, json
+mounts = json.load(sys.stdin)[0]['Mounts']
+for m in mounts: print(m['Source'], '->', m['Destination'])
+"
+# Look for the mount whose Destination is /etc/prometheus or similar.
+# That Source path is where you add entries to prometheus.yml and create the rules/ subdir.
+```
+
+Edit the discovered `prometheus.yml` on Quorra:
 
 ```yaml
 # Add to scrape_configs section — do NOT replace existing targets
@@ -698,12 +841,29 @@ Edit `/path/to/prometheus.yml` on Quorra (find the exact path with `docker inspe
   metrics_path: '/metrics'
   scrape_interval: 15s
   scrape_timeout: 10s
+
+# Also add the Python workers health endpoint for worker availability alerting
+- job_name: 'hypereels-workers'
+  static_configs:
+    - targets: ['192.168.1.100:8000']
+  metrics_path: '/metrics'
+  scrape_interval: 30s
+  scrape_timeout: 10s
 ```
 
-Reload Prometheus (no restart needed):
+Ensure the `rule_files:` stanza in `prometheus.yml` includes the HypeReels alert rules file (see alert rules section below):
+
+```yaml
+rule_files:
+  # ... existing entries ...
+  - "rules/hypereels.yml"
+```
+
+Reload Prometheus (no restart needed — requires `--web.enable-lifecycle`):
 
 ```bash
 curl -X POST http://192.168.1.100:9090/-/reload
+# Expected: empty 200 response
 ```
 
 Verify the target is up:
@@ -711,7 +871,8 @@ Verify the target is up:
 ```bash
 curl -s http://192.168.1.100:9090/api/v1/targets | \
   python3 -c "import sys,json; [print(t['labels']['job'], t['health']) for t in json.load(sys.stdin)['data']['activeTargets']]"
-# Expected: hypereels-api up
+# Expected lines containing: hypereels-api up
+#                             hypereels-workers up
 ```
 
 ### Grafana Dashboard
@@ -761,12 +922,16 @@ Cron entry on Quorra (edit with `crontab -e` as root):
 ```bash
 # /etc/cron.d/hypereels-backup
 # Nightly PostgreSQL dump at 02:00
-0 2 * * * root /usr/bin/pg_dump -h 192.168.1.100 -p 7432 -U hypereels hypereels | \
+# PGPASSWORD must be set so pg_dump does not hang waiting for interactive input in cron.
+0 2 * * * root PGPASSWORD=<POSTGRES_PASSWORD> /usr/bin/pg_dump \
+  -h 192.168.1.100 -p 7432 -U hypereels hypereels | \
   gzip > /tmp/hypereels-postgres-$(date +\%Y\%m\%d).sql.gz && \
   /usr/local/bin/mc cp /tmp/hypereels-postgres-$(date +\%Y\%m\%d).sql.gz \
     local/hypereels/backups/postgres/ && \
   rm -f /tmp/hypereels-postgres-$(date +\%Y\%m\%d).sql.gz
 ```
+
+> **Note:** Replace `<POSTGRES_PASSWORD>` with the actual password, or store it in a root-owned, 600-mode file (e.g., `/root/.pgpass`) and use the `.pgpass` mechanism instead to avoid the password appearing in the cron file.
 
 Install `mc` on Quorra and configure the alias (points at MinIO CT 115):
 
@@ -776,14 +941,28 @@ chmod +x /usr/local/bin/mc
 mc alias set local http://192.168.1.138:9000 <MINIO_ACCESS_KEY> <MINIO_SECRET_KEY>
 ```
 
-#### Redis — Weekly AOF copy (CT 114)
+#### Redis — Weekly AOF copy (run from Quorra, pulls file from CT 114 via scp)
+
+`mc` is NOT installed on CT 114 (minimal Redis LXC). The backup cron runs on **Quorra**, copies the AOF from CT 114 over scp, then uploads to MinIO via `mc`.
+
+Prerequisite: passwordless SSH from Quorra root to CT 114:
 
 ```bash
-# /etc/cron.d/hypereels-redis-backup
+# On Quorra — copy Quorra's root SSH public key to CT 114
+ssh-copy-id root@192.168.1.137
+# Or manually append /root/.ssh/id_rsa.pub to /root/.ssh/authorized_keys on CT 114
+```
+
+Cron entry on Quorra (edit with `crontab -e` as root):
+
+```bash
+# /etc/cron.d/hypereels-redis-backup (on Quorra)
 # Weekly Redis AOF backup every Sunday at 03:00
-0 3 * * 0 root cp /var/lib/redis/appendonly.aof /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof && \
+0 3 * * 0 root \
+  scp root@192.168.1.137:/var/lib/redis/appendonly.aof \
+    /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof && \
   gzip /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof && \
-  mc cp /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof.gz \
+  /usr/local/bin/mc cp /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof.gz \
     local/hypereels/backups/redis/ && \
   rm -f /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof.gz
 ```
@@ -841,18 +1020,24 @@ gunzip -c /tmp/hypereels-postgres-YYYYMMDD.sql.gz | \
 #### Restore Redis
 
 ```bash
-# 1. Stop Redis
-pct enter 114
-systemctl stop redis-server
+# Run from Quorra (mc is installed here; CT 114 has no mc)
 
-# 2. Download and restore AOF
-mc cp local/hypereels/backups/redis/hypereels-redis-YYYYMMDD.aof.gz /tmp/
+# 1. Download backup from MinIO to Quorra
+/usr/local/bin/mc cp local/hypereels/backups/redis/hypereels-redis-YYYYMMDD.aof.gz /tmp/
 gunzip /tmp/hypereels-redis-YYYYMMDD.aof.gz
-cp /tmp/hypereels-redis-YYYYMMDD.aof /var/lib/redis/appendonly.aof
-chown redis:redis /var/lib/redis/appendonly.aof
 
-# 3. Restart Redis
-systemctl start redis-server
+# 2. Stop Redis on CT 114
+pct exec 114 -- systemctl stop redis-server
+
+# 3. Copy AOF from Quorra to CT 114
+scp /tmp/hypereels-redis-YYYYMMDD.aof root@192.168.1.137:/var/lib/redis/appendonly.aof
+ssh root@192.168.1.137 "chown redis:redis /var/lib/redis/appendonly.aof"
+
+# 4. Restart Redis on CT 114
+pct exec 114 -- systemctl start redis-server
+
+# 5. Clean up temp file on Quorra
+rm -f /tmp/hypereels-redis-YYYYMMDD.aof
 ```
 
 #### Restore from Proxmox Snapshot
@@ -883,13 +1068,13 @@ hypereels-postgres (Quorra Docker) → CT 114 (Redis) → CT 115 (MinIO) → CT 
 **Full startup sequence:**
 
 ```bash
-# Step 1 — Start PostgreSQL on Quorra (run on Quorra or via SSH)
+# Step 1 — Start PostgreSQL on Quorra (run from Proxmox host via SSH to Quorra)
 ssh root@192.168.1.100 \
   "cd /mnt/cache/appdata/hypereels && \
    docker-compose -f docker-compose.workers.yml --env-file .env.workers up -d hypereels-postgres"
 sleep 10
-# Verify
-docker exec hypereels-postgres pg_isready -U hypereels -d hypereels
+# Verify — run the health check *inside* Quorra over SSH, not locally
+ssh root@192.168.1.100 "docker exec hypereels-postgres pg_isready -U hypereels -d hypereels"
 # Expected: /var/run/postgresql:5432 - accepting connections
 
 # Step 2 — Start Redis (run on Proxmox host)
@@ -995,17 +1180,51 @@ Alerting rules are defined in `docs/prometheus-alerts.yml`. Load into the existi
 
 ### Load Alert Rules
 
-Copy `docs/prometheus-alerts.yml` to the Prometheus rules directory on Quorra and reload:
+Copy `docs/prometheus-alerts.yml` to the Prometheus rules directory on Quorra and reload.
+
+First, find the exact path where the Prometheus config lives on Quorra:
 
 ```bash
-# Find Prometheus config directory on Quorra
-docker inspect prometheus | grep -A5 Mounts
+# On Quorra — find the host-side mount for /etc/prometheus (or equivalent)
+PROM_CONFIG_DIR=$(docker inspect prometheus | python3 -c "
+import sys, json
+mounts = json.load(sys.stdin)[0]['Mounts']
+for m in mounts:
+    if '/etc/prometheus' in m['Destination'] or m['Destination'] == '/prometheus':
+        print(m['Source'])
+        break
+")
+echo "Prometheus config dir: $PROM_CONFIG_DIR"
+# TODO: operator must verify this path matches their Prometheus container config mount
+```
 
-# Copy alert rules
-cp docs/prometheus-alerts.yml /path/to/prometheus/rules/hypereels.yml
+Copy the rules file and ensure `prometheus.yml` references it:
 
-# Reload Prometheus
+```bash
+# Create rules subdirectory if it doesn't exist
+mkdir -p "$PROM_CONFIG_DIR/rules"
+
+# Copy alert rules from repo (run from the repo directory on Quorra, or scp the file over)
+cp docs/prometheus-alerts.yml "$PROM_CONFIG_DIR/rules/hypereels.yml"
+
+# Ensure prometheus.yml includes the rules file (add if missing):
+# rule_files:
+#   - "rules/hypereels.yml"
+grep -q "rules/hypereels.yml" "$PROM_CONFIG_DIR/prometheus.yml" \
+  || echo '  - "rules/hypereels.yml"' >> "$PROM_CONFIG_DIR/prometheus.yml"
+
+# Reload Prometheus (requires --web.enable-lifecycle — see Section 7)
 curl -X POST http://192.168.1.100:9090/-/reload
+
+# Verify rules loaded
+curl -s http://192.168.1.100:9090/api/v1/rules | \
+  python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+groups = data['data']['groups']
+hr = [r['name'] for g in groups for r in g['rules'] if g['name'] == 'hypereels']
+print('Loaded rules:', hr if hr else 'NONE — check rule_files stanza in prometheus.yml')
+"
 ```
 
 ### Uptime Check
@@ -1217,8 +1436,8 @@ All secrets below must be set in the appropriate location before deployment. Nev
 |--------|----------|---------|
 | PostgreSQL password | CT 113 `.env` (`DATABASE_URL`) and `workers/.env.workers` (`POSTGRES_PASSWORD`) | API, workers, hypereels-postgres Docker env |
 | Redis password | CT 113 `.env` (`REDIS_URL`) and CT 114 `redis.conf` | API, workers |
-| MinIO access key | CT 113 `.env` (`R2_ACCESS_KEY_ID`) and CT 115 `/etc/minio/minio.env` | API, workers |
-| MinIO secret key | CT 113 `.env` (`R2_SECRET_ACCESS_KEY`) and CT 115 `/etc/minio/minio.env` | API, workers |
+| MinIO access key | CT 113 `.env` (`MINIO_ACCESS_KEY_ID` / `R2_ACCESS_KEY_ID`) and CT 115 `/etc/minio/minio.env` (as `MINIO_ROOT_USER`) | API, workers |
+| MinIO secret key | CT 113 `.env` (`MINIO_SECRET_ACCESS_KEY` / `R2_SECRET_ACCESS_KEY`) and CT 115 `/etc/minio/minio.env` (as `MINIO_ROOT_PASSWORD`) | API, workers |
 | MinIO backup key | Quorra `mc alias` config | Backup cron jobs (pg_dump cron on Quorra) |
 | Cloudflare tunnel token | Cloudflare-Tron container config on Quorra | External access |
 | NPM admin password | NPM web UI (built-in auth) | Proxy host management |
