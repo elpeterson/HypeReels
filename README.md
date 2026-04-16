@@ -11,6 +11,7 @@ The entire stack runs on two on-premises servers with no dependency on any manag
 1. [What is HypeReels](#1-what-is-hypereels)
 2. [Architecture Overview](#2-architecture-overview)
 3. [Prerequisites](#3-prerequisites)
+- [Deployment Profiles](#deployment)
 4. [First-Time Setup](#4-first-time-setup)
 5. [Environment Variables](#5-environment-variables)
 6. [Running End-to-End (Verification)](#6-running-end-to-end-verification)
@@ -170,6 +171,20 @@ Expected output includes `GTX 1080 Ti`. Note: HypeReels workers run **CPU-only**
 
 ---
 
+## Deployment
+
+HypeReels supports three deployment profiles. See the [Deployment Guide](docs/deployment/README.md) for the full guide.
+
+| Profile | Guide |
+|---------|-------|
+| Self-Hosted (Proxmox/CPU) | [docs/deployment/profile-1-cpu.md](docs/deployment/profile-1-cpu.md) |
+| Self-Hosted (Unraid/GPU) | [docs/deployment/profile-2-gpu.md](docs/deployment/profile-2-gpu.md) |
+| Production (split-host) | Internal — see private runbook (`docs/infrastructure.md`) |
+
+The steps below document the **owner's production split-host deployment** (Profile 3). For generic guides with placeholder values, start with the profile docs linked above.
+
+---
+
 ## 4. First-Time Setup
 
 Work through these steps in order. Steps 1 and 2 are one-time provisioning. Steps 3 onward are repeatable.
@@ -245,6 +260,13 @@ zfs create storage_1tb/minio-data
 
 # Bind mount into the MinIO LXC
 pct set 115 --mp0 /storage_1tb/minio-data,mp=/data
+
+# REQUIRED: Unprivileged LXC containers remap UIDs. Container root (UID 0) maps
+# to host UID 100000. The ZFS dataset is owned by host root (UID 0:0), which is
+# inaccessible from inside the container. Fix by chowning to the mapped UID:
+chown -R 100000:100000 /storage_1tb/minio-data/
+# This must be run on the Proxmox HOST (not inside the container).
+# If you forget this step, MinIO will start but fail all writes with 'permission denied'.
 ```
 
 **Note:** Do NOT use `ISO_Storage` for MinIO data. `ISO_Storage` is a dir-type pool reserved for ISO images only and is not suitable for MinIO data workloads. Use `storage_1tb` (ZFS, 899 GB) for MinIO.
@@ -343,9 +365,16 @@ Copy the server source to the API LXC:
 
 ```bash
 # From the repo root on your developer machine:
-scp -r server/ root@192.168.1.122:/tmp/hypereels-server
+rsync -av --exclude=node_modules --exclude='.git' server/ root@192.168.1.136:/opt/hypereels/server/
+# Note: --exclude=node_modules is critical — macOS-compiled .node binaries
+# are incompatible with Linux and will cause dlopen errors or silent failures.
+# npm ci runs inside CT 113 after the transfer to install Linux-compatible binaries.
 
-# On Case, push into the LXC:
+# Alternatively (preferred): git clone inside the LXC avoids the platform binary
+# problem entirely, since dependencies are installed natively in the container.
+# See the infrastructure.md CT 113 setup for the git clone approach.
+
+# On Case, ensure the LXC directory exists:
 pct exec 113 -- mkdir -p /opt/hypereels
 # Copy from Case host into the container filesystem
 cp -r /tmp/hypereels-server/* /var/lib/lxc/113/rootfs/opt/hypereels/
@@ -366,16 +395,35 @@ pct exec 113 -- bash -c "
 
 Create `/opt/hypereels/.env` inside CT 113 with the production values (see [Section 5](#5-environment-variables)).
 
-Install PM2 and start the API:
+Start the API:
+
+> **⚠️ PM2 WARNING:** PM2 does not load `.env` files. The `env_file` option in `ecosystem.config.cjs`
+> is silently ignored. All environment variables must be either:
+> - (a) Set as process environment variables before PM2 starts (via systemd `EnvironmentFile`), OR
+> - (b) Inlined directly in the `env:` block of `ecosystem.config.cjs`
+>
+> **Option (a) is strongly recommended for production** — use the provided systemd unit instead of PM2.
+> See: `server/hypereels-api.service`
 
 ```bash
+# PRODUCTION (recommended): Use systemd
 pct exec 113 -- bash -c "
-  npm install -g pm2 &&
-  cd /opt/hypereels &&
-  pm2 start dist/index.js --name hypereels-api &&
-  pm2 save &&
-  pm2 startup systemd
+  cp /opt/hypereels/server/hypereels-api.service /etc/systemd/system/ &&
+  systemctl daemon-reload &&
+  systemctl enable hypereels-api &&
+  systemctl start hypereels-api &&
+  systemctl status hypereels-api
 "
+
+# ALTERNATIVE (development only): PM2
+# WARNING: Requires env vars to be set in the shell environment or inlined in ecosystem.config.cjs
+# pct exec 113 -- bash -c "
+#   npm install -g pm2 &&
+#   cd /opt/hypereels &&
+#   pm2 start dist/index.js --name hypereels-api &&
+#   pm2 save &&
+#   pm2 startup systemd
+# "
 ```
 
 Alternatively, use the production Docker image from the `server/Dockerfile` prod stage:
@@ -389,7 +437,27 @@ docker build -t hypereels-api:latest --target prod ./server
 
 CT 100 (Nginx Proxy Manager) is already running at 192.168.1.123. Do NOT create a new Nginx LXC. Instead, add a single proxy host entry in the NPM web UI.
 
-Open `http://192.168.1.123:81` in your browser and log in to the NPM admin UI. Then add a new Proxy Host:
+Open `http://192.168.1.123:81` in your browser and log in to the NPM admin UI.
+
+> **⚠️ IMPORTANT — Do this BEFORE requesting the Let's Encrypt certificate:**
+>
+> The Cloudflare Zero Trust tunnel must be configured to route `hypereels.thesquids.ink`
+> BEFORE NPM can complete the ACME HTTP-01 challenge. If the hostname isn't in Cloudflare
+> first, Let's Encrypt cannot reach NPM and certificate issuance will fail.
+>
+> Steps:
+> 1. Go to: https://one.dash.cloudflare.com → Networks → Tunnels
+> 2. Select your existing tunnel → Configure → Public Hostnames → Add a public hostname
+> 3. Set:
+>    - Subdomain: `hypereels` (or your chosen prefix)
+>    - Domain: `thesquids.ink` (or your domain)
+>    - Type: HTTP
+>    - URL: `192.168.1.123` (NPM container IP) — Cloudflare handles the TLS termination
+> 4. Save and wait ~60 seconds for DNS propagation
+> 5. Verify: `curl -I https://hypereels.thesquids.ink` should reach NPM (may 502 until proxy host is configured — that's fine)
+> 6. NOW request the Let's Encrypt certificate in NPM
+
+Then add a new Proxy Host:
 
 ```
 # Nginx Proxy Manager Setup (http://192.168.1.123:81)
@@ -938,17 +1006,20 @@ scp -r ~/.insightface/models/buffalo_l/ root@192.168.1.100:/mnt/user/appdata/ins
 **Fix:**
 
 ```bash
-# Verify the storage_1tb ZFS dataset bind mount is active inside CT 114
-pct exec 114 -- df -h /data
+# Verify the storage_1tb ZFS dataset bind mount is active inside CT 115
+pct exec 115 -- df -h /data
 
 # If not mounted, check the ZFS dataset exists and re-attach
 zfs list storage_1tb/minio-data
-pct set 114 --mp0 /storage_1tb/minio-data,mp=/data
-pct reboot 114
+pct set 115 --mp0 /storage_1tb/minio-data,mp=/data
+pct reboot 115
 
 # Re-create the bucket if missing
-pct exec 114 -- mc alias set local http://192.168.1.137:9000 MINIO_USER MINIO_PASSWORD
-pct exec 114 -- mc mb --ignore-existing local/hypereel
+# NOTE: mc is installed to /usr/local/bin/mc and is NOT on PATH by default.
+# Use the full path:
+/usr/local/bin/mc alias set local http://192.168.1.138:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+pct exec 115 -- /usr/local/bin/mc alias set local http://192.168.1.138:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+pct exec 115 -- /usr/local/bin/mc mb --ignore-existing local/hypereel
 ```
 
 ---

@@ -6,19 +6,23 @@
  *  2. Register sessionAuth + errorHandler
  *  3. Register all route files
  *  4. Register /health and /metrics (outside session-auth)
- *  5. Initialise SSE Redis subscriber
- *  6. Start workers (person-detection, audio-analysis, assembly, cleanup)
- *  7. Listen
- *  8. Wire SIGTERM/SIGINT for graceful shutdown
+ *  5. Register static file serving (React SPA from client-dist/)
+ *  6. Initialise SSE Redis subscriber
+ *  7. Start workers (person-detection, audio-analysis, assembly, cleanup)
+ *  8. Listen
+ *  9. Wire SIGTERM/SIGINT for graceful shutdown
  */
 import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
+import fastifyStatic from '@fastify/static';
+import path from 'path';
+import { existsSync } from 'fs';
 import * as promClient from 'prom-client';
 
-import { runMigrations, pool } from './db/client.js';
+import { runMigrations, waitForDatabase, pool } from './db/client.js';
 import { closeRedis } from './lib/redis.js';
 import { initSSESubscriber, closeSSESubscriber } from './lib/sse.js';
 import { closeQueues } from './jobs/queues.js';
@@ -218,6 +222,68 @@ export async function buildApp() {
       .send(metrics);
   });
 
+  // ── React SPA static file serving ─────────────────────────────────────────
+  // Build the SPA and copy to client-dist/ before starting the server in production:
+  //   cd <repo-root> && VITE_API_URL="" npm run build    # use relative URLs (same-origin serving)
+  //   cp -r dist/ server/client-dist/                    # make it available to the API
+  // In development, leave CLIENT_DIST_PATH unset — Vite dev server runs separately on :5173.
+  //
+  // Serves the Vite build output from client-dist/ when present.
+  // If the directory doesn't exist (e.g. API-only dev), this block is skipped.
+  // SPA routing: any unmatched GET that the browser would navigate to (Accept: text/html)
+  // gets index.html so React Router can handle it client-side.
+
+  const clientDistPath =
+    process.env['CLIENT_DIST_PATH'] ??
+    path.join(process.cwd(), 'client-dist');
+
+  if (existsSync(clientDistPath)) {
+    await fastify.register(fastifyStatic, {
+      root: clientDistPath,
+      prefix: '/',
+      wildcard: false,       // Only serve exact file matches; fall through to notFoundHandler
+      decorateReply: false,  // reply.sendFile() already decorated by fastifyStatic
+    });
+
+    // Override the notFoundHandler set by errorHandlerPlugin:
+    // - Browser navigation (Accept: text/html) → serve index.html for React Router
+    // - Everything else → standard JSON 404
+    fastify.setNotFoundHandler(async (request, reply) => {
+      if (
+        request.method === 'GET' &&
+        (request.headers.accept?.includes('text/html') ||
+          request.headers.accept?.includes('*/*'))
+      ) {
+        try {
+          return reply.sendFile('index.html', clientDistPath);
+        } catch {
+          // index.html not found — fall through to JSON 404
+        }
+      }
+      return reply.code(404).send({
+        error: {
+          code: 'NOT_FOUND',
+          message: `Route ${request.method} ${request.url} not found.`,
+        },
+      });
+    });
+
+    fastify.log.info(`Serving React SPA from ${clientDistPath}`);
+  } else {
+    fastify.log.info(
+      `No client-dist found at ${clientDistPath} — API-only mode`,
+    );
+    // No SPA to serve — register a plain JSON 404 handler.
+    fastify.setNotFoundHandler(async (request, reply) => {
+      return reply.code(404).send({
+        error: {
+          code: 'NOT_FOUND',
+          message: `Route ${request.method} ${request.url} not found.`,
+        },
+      });
+    });
+  }
+
   return fastify;
 }
 
@@ -226,6 +292,11 @@ export async function buildApp() {
 async function main() {
   const port = parseInt(process.env['PORT'] ?? '3001', 10);
   const host = process.env['HOST'] ?? '0.0.0.0';
+
+  // Wait for PostgreSQL to be reachable before running migrations.
+  // Uses exponential backoff (2s → 4s → … → 30s cap, 10 attempts) so that
+  // a race condition on first boot or a DB restart doesn't crash-loop the API.
+  await waitForDatabase();
 
   // Apply DB migrations before anything else
   await runMigrations();
