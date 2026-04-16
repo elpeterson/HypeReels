@@ -1103,6 +1103,33 @@ Do NOT spin up new Grafana, Prometheus, or InfluxDB instances. All HypeReels obs
 
 ---
 
+### ADR-016: Static File Serving via @fastify/static
+
+- **Status:** Accepted
+- **Context:** No static file serving existed in any deployment profile. The README said "serve with any static file server" but provided no working path. Issue #9 blocked a real deployer who could not determine how to co-locate the SPA and API.
+- **Decision:** `@fastify/static` serves the pre-built React SPA from `server/client-dist/` directly from the API process. `VITE_API_URL=""` is set at build time so the SPA uses relative URLs (same-origin). The static plugin is registered after all API routes so API routes take precedence. A SPA fallback `setNotFoundHandler` sends `index.html` for `GET` requests that include `text/html` in `Accept`, enabling React Router client-side routing. The `CLIENT_DIST_PATH` env var allows the dist path to be overridden per deployment. All three deployment profiles use this approach.
+- **Consequences:** The SPA must be built and copied to `server/client-dist/` before production start (`VITE_API_URL="" npm run build && cp -r dist/ server/client-dist/`). The API process carries static assets (~50–150 MB) in memory-mapped files. No separate Nginx/Caddy is required solely for static serving (NPM on CT 100 still handles TLS termination and reverse-proxy to port 3001).
+
+---
+
+### ADR-017: systemd over PM2 for Process Management
+
+- **Status:** Accepted
+- **Context:** PM2's `env_file` option is silently ignored in `ecosystem.config.cjs` (issues #4, #7). The only working alternative in PM2 is to inline all environment variables directly in the config file, which is a security and maintenance regression — secrets visible in a checked-in or world-readable file.
+- **Decision:** Native systemd unit (`server/hypereels-api.service`) with `EnvironmentFile=/opt/hypereels/.env` is the recommended production process manager for all bare-metal/LXC profiles (Profile 1: single Proxmox host, Profile 3: Production Case+Quorra). `systemctl enable --now hypereels-api` replaces `pm2 start`. Profile 2 (Unraid Docker Compose) uses Docker's native `env_file` directive. `ecosystem.config.cjs` is retained as a development convenience only with a prominent warning comment.
+- **Consequences:** `systemctl start|stop|restart|status hypereels-api` replaces `pm2` commands. `journalctl -u hypereels-api -f` replaces `pm2 logs`. Logs are appended to `/var/log/hypereels/api.log` and `/var/log/hypereels/api-error.log` (the log directory must exist before service start). `LimitNOFILE=65536` prevents open-file exhaustion under load.
+
+---
+
+### ADR-018: Database Placement Per Deployment Profile
+
+- **Status:** Accepted
+- **Context:** Profile 3 (Production) has PostgreSQL running in a Docker container on Quorra (port 7432). Profile 1 (single Proxmox host, no Quorra) has no Quorra to target. Profile 2 (Unraid-only Docker Compose) needs a local DB. Each profile needs a clear, operable `DATABASE_URL`.
+- **Decision:** Profile 1 (Proxmox LXC only): Install PostgreSQL natively via `apt` inside the API LXC (CT 113). Connection is loopback (`localhost:5432`), eliminating network latency and the Quorra dependency for a single-host deployment. Profile 2 (Docker Compose on Unraid): PostgreSQL as a `postgres:18` Docker Compose service on the same stack; `DATABASE_URL` uses the Docker service name. Profile 3 (Production — Case + Quorra): Docker container on Quorra at `192.168.1.100:7432` (unchanged).
+- **Consequences:** `DATABASE_URL` differs per profile but all profiles use the same `.env` template (`.env.example`). Profile 1 requires `pg_createcluster` / `createuser` / `createdb` steps during initial provisioning. Profile 3 retains the existing Quorra container. The `waitForDatabase()` backoff (ADR-016 companion change, Fix 1 in the backend PR) handles transient connectivity failures at startup across all profiles.
+
+---
+
 > **Next step:** Architecture is ready in `docs/architecture.md`. Steps 3–5 can now run in parallel:
 > - Invoke `@frontend-engineer` for UI implementation
 > - Invoke `@backend-engineer` for API and business logic

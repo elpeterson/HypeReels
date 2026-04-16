@@ -1,0 +1,20 @@
+[Unit]
+Description=HypeReels API Server
+Documentation=https://github.com/elpeterson/HypeReels
+After=network.target
+
+[Service]
+Type=simple
+User=hypereels
+Group=hypereels
+WorkingDirectory=/opt/hypereels/server
+EnvironmentFile=/opt/hypereels/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/hypereels/api.log
+StandardError=append:/var/log/hypereels/api-error.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

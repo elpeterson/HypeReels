@@ -51,6 +51,31 @@ export async function withTransaction<T>(
 }
 
 /**
+ * Wait for the database to become available before proceeding.
+ *
+ * Uses exponential backoff starting at 2 s and capping at 30 s.
+ * Throws after maxAttempts if the DB never responds, so the process
+ * exits cleanly and PM2 / systemd can restart with its own backoff.
+ */
+export async function waitForDatabase(maxAttempts = 10): Promise<void> {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await pool.query('SELECT 1');
+      return;
+    } catch (err) {
+      const delayMs = Math.min(1000 * 2 ** attempt, 30_000); // 2s, 4s, 8s… cap at 30s
+      console.log(
+        `[db] Database not ready (attempt ${attempt}/${maxAttempts}), retrying in ${delayMs}ms…`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw new Error(
+    '[db] Database did not become available after maximum retry attempts',
+  );
+}
+
+/**
  * Run all pending SQL migrations from server/src/db/migrations/.
  *
  * Idempotent: tracks applied migrations in a `schema_migrations` table.

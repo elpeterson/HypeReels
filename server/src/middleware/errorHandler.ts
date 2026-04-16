@@ -69,15 +69,10 @@ const errorHandlerPlugin: FastifyPluginAsync = async (fastify) => {
     },
   );
 
-  // Handle 404 from route not found
-  fastify.setNotFoundHandler((request, reply) => {
-    reply.code(404).send({
-      error: {
-        code: 'NOT_FOUND',
-        message: `Route ${request.method} ${request.url} not found.`,
-      },
-    });
-  });
+  // NOTE: setNotFoundHandler is intentionally NOT set here.
+  // index.ts registers the not-found handler after all routes so it can serve
+  // the React SPA (index.html) for browser navigation requests when client-dist/
+  // is present, and fall back to a JSON 404 for all other cases.
 };
 
 export default fp(errorHandlerPlugin, { name: 'errorHandler' });

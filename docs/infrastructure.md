@@ -1,5 +1,11 @@
 # HypeReels Infrastructure
 
+> **⚠️ Internal Deployment Guide — Profile 3 (Production)**
+> This document is specific to the owner's split-host production deployment.
+> For generic self-hosted guides, see [docs/deployment/README.md](./deployment/README.md).
+> Operator-specific details (real IPs, domain, credentials) should be stored privately
+> and not committed to public repositories.
+
 > Owner: DevOps Engineer
 > Last updated: 2026-04-08
 > Proxmox version: 9.1.5 | Unraid version: 7.2.2
@@ -162,6 +168,13 @@ mkdir -p /opt/hypereels/app
 chown hypereels:hypereels /opt/hypereels/app
 
 # Clone repo (adjust remote URL to match your repo)
+# NOTE: git clone is the preferred approach for deploying into CT 113. It avoids
+# the platform binary incompatibility problem that occurs when copying from a macOS
+# developer machine via scp/rsync (macOS-compiled .node binaries are not
+# compatible with Linux and will cause dlopen errors or silent failures).
+# If you must rsync instead of clone, use:
+#   rsync -av --exclude=node_modules --exclude='.git' server/ root@192.168.1.136:/opt/hypereels/server/
+# Then run npm ci inside the container to install Linux-compatible binaries.
 git clone https://github.com/<org>/hypereels.git /opt/hypereels/app
 chown -R hypereels:hypereels /opt/hypereels/app
 
@@ -190,9 +203,24 @@ PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hyp
 PGPASSWORD=<POSTGRES_PASSWORD> psql -h 192.168.1.100 -p 7432 -U hypereels -d hypereels \
   -c "\dt"
 
-# Start with PM2
-pm2 start /opt/hypereels/app/ecosystem.config.cjs
-pm2 save
+# ⚠️  PM2 WARNING: PM2 does not load .env files. The `env_file` option in ecosystem.config.cjs
+# is silently ignored. All environment variables must be either:
+#   (a) Set as process environment variables before PM2 starts (via systemd EnvironmentFile), OR
+#   (b) Inlined directly in the `env:` block of ecosystem.config.cjs
+# Option (a) is strongly recommended for production — use the provided systemd unit instead of PM2.
+# See: server/hypereels-api.service
+
+# PRODUCTION (recommended): Use systemd
+cp /opt/hypereels/app/server/hypereels-api.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable hypereels-api
+systemctl start hypereels-api
+systemctl status hypereels-api
+
+# ALTERNATIVE (development only): PM2
+# WARNING: Requires env vars to be set in the shell environment or inlined in ecosystem.config.cjs
+# pm2 start /opt/hypereels/app/ecosystem.config.cjs
+# pm2 save
 
 # Restrict port 3001 to LAN-internal callers only (NPM on 192.168.1.123, Quorra on 192.168.1.100)
 # Allow loopback and the two permitted source IPs; drop everything else on 3001
@@ -232,29 +260,33 @@ module.exports = {
 }
 ```
 
-Systemd unit to start PM2 on boot (`/etc/systemd/system/hypereels-pm2.service`):
+> **⚠️ PM2 WARNING:** PM2 does not load `.env` files. The `env_file` option in `ecosystem.config.cjs`
+> is silently ignored. All environment variables must be either:
+> - (a) Set as process environment variables before PM2 starts (via systemd `EnvironmentFile`), OR
+> - (b) Inlined directly in the `env:` block of `ecosystem.config.cjs`
+>
+> **Option (a) is strongly recommended for production** — use the provided systemd unit instead of PM2.
+> See: `server/hypereels-api.service`
 
-```ini
-[Unit]
-Description=HypeReels PM2 process manager
-After=network.target
+**Production process management: systemd (recommended)**
 
-[Service]
-Type=forking
-User=hypereels
-WorkingDirectory=/opt/hypereels/app
-ExecStart=/usr/bin/pm2 resurrect
-ExecStop=/usr/bin/pm2 kill
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
+The preferred way to run the API in production is via the systemd unit at `server/hypereels-api.service`, which uses `EnvironmentFile` to load secrets from `/opt/hypereels/app/.env`.
 
 ```bash
-systemctl enable hypereels-pm2
-systemctl start hypereels-pm2
+cp /opt/hypereels/app/server/hypereels-api.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable hypereels-api
+systemctl start hypereels-api
+systemctl status hypereels-api
+```
+
+**Development alternative: PM2**
+
+PM2 can be used for local development but requires env vars to be pre-set in the environment or inlined in `ecosystem.config.cjs` — it does NOT read `.env` files.
+
+```bash
+# systemctl enable hypereels-pm2
+# systemctl start hypereels-pm2
 ```
 
 ### PostgreSQL (Quorra Docker — `hypereels-postgres`)
@@ -346,6 +378,33 @@ RestartSec=5
 EOF
 
 systemctl daemon-reload
+
+# Unprivileged LXC containers cannot use systemd namespace sandboxing.
+# The default redis-server.service unit uses PrivateUsers/PrivateTmp/etc. which
+# fail with status=226/NAMESPACE in an unprivileged container.
+# Replace the unit entirely with a minimal version:
+cat > /etc/systemd/system/redis-server.service << 'EOF'
+[Unit]
+Description=Advanced key-value store
+After=network.target
+
+[Service]
+Type=forking
+ExecStart=/usr/bin/redis-server /etc/redis/redis.conf --daemonize yes
+ExecStop=/bin/kill -s TERM $MAINPID
+PIDFile=/run/redis/redis-server.pid
+TimeoutStopSec=0
+Restart=always
+User=redis
+Group=redis
+RuntimeDirectory=redis
+RuntimeDirectoryMode=2755
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
 systemctl enable redis-server
 systemctl restart redis-server
 
@@ -364,6 +423,13 @@ pct create 115 local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst \
   --nameserver 192.168.1.1 \
   --onboot 1 \
   --start 1
+
+# REQUIRED: Unprivileged LXC containers remap UIDs. Container root (UID 0) maps
+# to host UID 100000. The ZFS dataset is owned by host root (UID 0:0), which is
+# inaccessible from inside the container. Fix by chowning to the mapped UID:
+chown -R 100000:100000 /storage_1tb/minio-data/
+# This must be run on the Proxmox HOST (not inside the container).
+# If you forget this step, MinIO will start but fail all writes with 'permission denied'.
 
 pct enter 115
 ```
@@ -702,6 +768,24 @@ The GTX 1080 Ti on Quorra is shared by three services:
 ## 5. Nginx Proxy Manager Configuration
 
 NPM is already running at http://192.168.1.123:81. Add one proxy host for HypeReels.
+
+> **⚠️ IMPORTANT — Do this BEFORE requesting the Let's Encrypt certificate:**
+>
+> The Cloudflare Zero Trust tunnel must be configured to route `hypereels.thesquids.ink`
+> BEFORE NPM can complete the ACME HTTP-01 challenge. If the hostname isn't in Cloudflare
+> first, Let's Encrypt cannot reach NPM and certificate issuance will fail.
+>
+> Steps:
+> 1. Go to: https://one.dash.cloudflare.com → Networks → Tunnels
+> 2. Select your existing tunnel → Configure → Public Hostnames → Add a public hostname
+> 3. Set:
+>    - Subdomain: `hypereels`
+>    - Domain: `thesquids.ink`
+>    - Type: HTTP
+>    - URL: `192.168.1.123` (NPM container IP) — Cloudflare handles the TLS termination
+> 4. Save and wait ~60 seconds for DNS propagation
+> 5. Verify: `curl -I https://hypereels.thesquids.ink` should reach NPM (may 502 until proxy host is configured — that's fine)
+> 6. NOW proceed to add the proxy host and request the Let's Encrypt certificate below
 
 ### Steps
 
