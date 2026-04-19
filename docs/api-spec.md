@@ -25,8 +25,8 @@ info:
 servers:
   - url: http://localhost:3001
     description: Local development
-  - url: https://api.hypereels.app
-    description: Production
+  - url: https://hypereels.thesquids.ink
+    description: Production (Cloudflare Zero Trust tunnel → NPM CT 100 → CT 113:3001)
 
 # ─── Security ─────────────────────────────────────────────────────────────────
 components:

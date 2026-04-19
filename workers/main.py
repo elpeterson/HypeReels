@@ -3,8 +3,8 @@
 Exposes three synchronous endpoints that the Node.js backend calls:
 
   POST /analyse-audio   → audio analysis (librosa)
-  POST /assemble-reel   → EDL build + FFmpeg render + R2 upload
-  POST /detect-persons  → frame sampling + AWS Rekognition + face clustering
+  POST /assemble-reel   → EDL build + FFmpeg render + MinIO upload
+  POST /detect-persons  → frame sampling + InsightFace buffalo_l (CPU-only) + face clustering
 
 Each endpoint runs the job synchronously (the Node worker already handles
 async queuing) and returns structured JSON.  Errors are returned as HTTP 422
@@ -376,9 +376,11 @@ def _configure_r2_from_request(body: AssembleReelRequest) -> None:
 class DetectPersonsRequest(BaseModel):
     """Body sent by the Node personDetectionWorker (HTTP mode)."""
     clip_id: str
-    clip_url: str = Field(..., description="Presigned R2 URL to the clip file")
+    clip_url: str = Field(..., description="Presigned MinIO URL to the clip file")
     session_id: str
-    collection_id: str
+    # collection_id is accepted for API compatibility but unused — InsightFace
+    # uses session_id directly for in-process embedding clustering (not a remote collection)
+    collection_id: str = ""
 
 
 class AppearanceWindow(BaseModel):
@@ -399,13 +401,12 @@ class DetectPersonsResponse(BaseModel):
 
 
 @app.post("/detect-persons", response_model=DetectPersonsResponse)
-async def detect_persons(body: DetectPersonsRequest) -> DetectPersonsResponse:
-    """Download clip, sample frames, run Rekognition, return person detections."""
+async def detect_persons_endpoint(body: DetectPersonsRequest) -> DetectPersonsResponse:
+    """Download clip, sample frames, run InsightFace (CPU-only), return person detections."""
     log.info(
         "http_detect_persons",
         clip_id=body.clip_id,
         session_id=body.session_id,
-        collection_id=body.collection_id,
     )
     try:
         result = _run_person_detection(body)
@@ -415,100 +416,69 @@ async def detect_persons(body: DetectPersonsRequest) -> DetectPersonsResponse:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+# ── Per-session in-process embedding store (cross-clip identity matching) ──────
+#
+# The InsightFace `detect_persons()` function accepts a mutable session_embeddings
+# list to enable cross-clip person identity matching within a session.  In the
+# HTTP (FastAPI) context each request is independent, so we maintain a short-lived
+# in-memory cache keyed by session_id.  This approximates the long-running worker
+# loop's embedding persistence without requiring any external state.
+#
+# The cache is process-local only — ephemeral by design.  Session cleanup (TTL)
+# resets are handled by the cleanup worker, not here.
+import threading as _threading
+
+_session_embeddings_lock = _threading.Lock()
+_session_embeddings_cache: dict[str, list[dict]] = {}
+
+
+def _get_session_embeddings(session_id: str) -> list[dict]:
+    """Return (and create if absent) the in-memory embedding list for *session_id*."""
+    with _session_embeddings_lock:
+        if session_id not in _session_embeddings_cache:
+            _session_embeddings_cache[session_id] = []
+        return _session_embeddings_cache[session_id]
+
+
 def _run_person_detection(body: DetectPersonsRequest) -> DetectPersonsResponse:
-    """Download clip via presigned URL, run person detection pipeline."""
-    import uuid as _uuid
+    """Run InsightFace buffalo_l (CPU-only) person detection on *body.clip_url*.
 
-    from person_detection.person_detection_worker import (
-        _rek_client,
-        _ensure_collection,
-        sample_frames,
-        detect_faces_in_frame,
-        cluster_detections_within_clip,
-        index_face_in_collection,
-        search_face_in_collection,
-        crop_face_thumbnail,
-        PersonTrack,
+    Uses the public ``detect_persons()`` entry point from
+    ``person_detection.person_detection_worker``, which handles frame sampling,
+    IoU clustering, ArcFace embedding comparison, thumbnail upload to MinIO, and
+    structured result assembly.
+
+    Cross-clip embedding state is maintained in ``_session_embeddings_cache`` so
+    that multiple clips belonging to the same session produce consistent
+    ``person_ref_id`` assignments even when processed as separate HTTP calls.
+    """
+    from person_detection.person_detection_worker import detect_persons
+
+    # Share embedding store across calls within the same session
+    session_embeddings = _get_session_embeddings(body.session_id)
+
+    raw = detect_persons(
+        clip_id=body.clip_id,
+        clip_url=body.clip_url,
+        session_id=body.session_id,
+        session_embeddings=session_embeddings,
     )
-    from common.r2_client import generate_presigned_url, upload_bytes
 
-    # Download clip to a temp file
-    tmp_path = _download_url(body.clip_url, suffix=".mp4")
-
-    try:
-        rek = _rek_client()
-        collection_id = body.collection_id
-        _ensure_collection(rek, collection_id)
-
-        frames = sample_frames(tmp_path)
-        if not frames:
-            return DetectPersonsResponse(clip_id=body.clip_id, persons=[])
-
-        # Detect faces per frame
-        frame_detections: list[tuple[int, list[dict]]] = []
-        for ts_ms, frame in frames:
-            faces = detect_faces_in_frame(rek, frame)
-            if faces:
-                frame_detections.append((ts_ms, faces))
-
-        if not frame_detections:
-            return DetectPersonsResponse(clip_id=body.clip_id, persons=[])
-
-        track_map = cluster_detections_within_clip(frame_detections)
-        frame_dict = {ts: frm for ts, frm in frames}
-
-        person_tracks: list[PersonTrack] = []
-
-        for _provisional_id, detections in track_map.items():
-            best_det = max(detections, key=lambda d: d.confidence)
-            best_frame = frame_dict.get(best_det.frame_ms)
-            if best_frame is None:
-                continue
-
-            existing_ref_id = search_face_in_collection(rek, collection_id, best_frame)
-            if existing_ref_id:
-                person_ref_id = existing_ref_id
-            else:
-                person_ref_id = str(_uuid.uuid4())
-                index_face_in_collection(rek, collection_id, best_frame, person_ref_id)
-
-            for det in detections:
-                det.person_ref_id = person_ref_id
-
-            thumbnail_crop = crop_face_thumbnail(best_frame, best_det.bounding_box)
-            import cv2
-            _, jpg_buf = cv2.imencode(".jpg", thumbnail_crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            thumb_key = f"thumbnails/{body.session_id}/{body.clip_id}/{person_ref_id}.jpg"
-            upload_bytes(jpg_buf.tobytes(), thumb_key, content_type="image/jpeg")
-            thumb_url = generate_presigned_url(thumb_key, expires_in=86400 * 7)
-
-            track = PersonTrack(
-                person_ref_id=person_ref_id,
-                clip_id=body.clip_id,
-                detections=detections,
-                thumbnail_r2_key=thumb_key,
-                thumbnail_url=thumb_url,
-                confidence=best_det.confidence,
-            )
-            person_tracks.append(track)
-
-        persons = [
+    return DetectPersonsResponse(
+        clip_id=raw["clip_id"],
+        persons=[
             PersonResult(
-                person_ref_id=t.person_ref_id,
-                thumbnail_url=t.thumbnail_url,
-                confidence=t.confidence,
+                person_ref_id=p["person_ref_id"],
+                thumbnail_url=p["thumbnail_url"],
+                confidence=p["confidence"],
                 appearances=[
                     AppearanceWindow(start_ms=a["start_ms"], end_ms=a["end_ms"])
-                    for a in t.appearances
+                    for a in p["appearances"]
                 ],
             )
-            for t in person_tracks
-        ]
-
-        return DetectPersonsResponse(clip_id=body.clip_id, persons=persons)
-
-    finally:
-        tmp_path.unlink(missing_ok=True)
+            for p in raw["persons"]
+        ],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 # HypeReels Architecture
 
 > This file is owned by the Architect agent.
-> Last updated: 2026-04-07 (revised: infrastructure corrections — correct LXC IPs, storage pool names, three-way GPU contention, NPM port/domain, API port 3001)
+> Last updated: 2026-04-19 (revised: ADR-017 corrected systemd paths; ADR-003/ADR-006 blocker notes added for workers/main.py Rekognition stale code and missing minio_client module; status trailer updated to reflect MVP implementation complete)
 
 ---
 
@@ -970,6 +970,7 @@ Do NOT spin up new Grafana, Prometheus, or InfluxDB instances. All HypeReels obs
 ### ADR-003: InsightFace (buffalo_l) over AWS Rekognition for Person Detection
 
 - **Status:** Accepted (supersedes previous ADR-003 for Rekognition; updated for CPU-only mode per ADR-013)
+- **Known issue:** The `workers/main.py` FastAPI `/detect-persons` HTTP endpoint (called by Node.js BullMQ workers via HTTP RPC) still references `_rek_client`, `_ensure_collection`, `search_face_in_collection`, and `index_face_in_collection` from the old Rekognition implementation. These functions do NOT exist in `workers/person_detection/person_detection_worker.py` (which uses InsightFace). The real worker logic is in `person_detection_worker.py`'s `detect_persons()` function. The HTTP entrypoint in `main.py` must be updated to call `detect_persons()` from `person_detection_worker.py` instead of the Rekognition functions. This is a **pre-production blocker** — person detection HTTP calls will fail at runtime.
 - **Context:** AWS Rekognition is a managed cloud service and is explicitly excluded. A self-hosted face detection and recognition solution is required. Quorra has an NVIDIA GTX 1080 Ti but it is shared between Frigate, FileFlows, and HypeReels; CPU-only mode is required (see ADR-013).
 - **Decision:** Use InsightFace with the `buffalo_l` model pack (RetinaFace detection + ArcFace recognition backbone) running in **CPU-only mode** on Quorra. `buffalo_l` is selected over `buffalo_s` because accuracy is more important than throughput at 2fps sampling — better ArcFace embeddings mean more reliable cross-clip person clustering with fewer false merges. Frame sampling at 2fps (one frame every 500 ms) is sufficient to detect all persons present in a clip.
 - **Consequences:** No per-API-call cost. Full control over model and data. Face embeddings never leave the on-premises network. Detection latency (~30–60 seconds per clip-minute) is higher than GPU mode but fully acceptable given async job processing. Moving to GPU mode in a future sprint requires only adding `--gpus all` to the Docker run config — no application code changes.
@@ -1000,6 +1001,7 @@ Do NOT spin up new Grafana, Prometheus, or InfluxDB instances. All HypeReels obs
 - **Context:** Audio analysis requires `librosa`; person detection requires InsightFace + OpenCV; video assembly requires FFmpeg subprocess calls. All are more natural in Python.
 - **Decision:** Four worker types run as Python 3.12 Docker containers on Quorra: audio analysis, person detection, assembly. The validation and cleanup workers run in Node.js alongside the API Server on Case (no Python dependencies needed for those two).
 - **Consequences:** Two runtimes (Node.js on Case, Python on Quorra). Python workers are FastAPI HTTP services — they do NOT consume BullMQ queues directly. Node.js BullMQ workers in CT 113 pick up jobs from Redis and call the Python FastAPI workers via HTTP POST (e.g. `POST /analyse-audio`, `POST /detect-persons`, `POST /assemble-reel`). This avoids the need for `python-bullmq` entirely and keeps the Python containers stateless HTTP services.
+- **Known issue (pre-production blocker):** `workers/common/r2_client.py` is named for the old Cloudflare R2 storage and must be renamed to `workers/common/minio_client.py` (or re-exported as an alias). `workers/person_detection/person_detection_worker.py` already imports from `common.minio_client` (the correct future name), but the file itself is `r2_client.py`. This import will fail at runtime. Additionally, the env vars it reads (`R2_ENDPOINT_URL`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME`) must map to the MinIO equivalents provided in `.env.workers`. The fix is: rename `r2_client.py` to `minio_client.py` (or add `minio_client.py` as a re-export shim) and update all remaining `r2_client` imports in `workers/main.py`, `workers/audio_analysis/audio_analysis_worker.py`, and `workers/assembly/assembly_worker.py`.
 
 ---
 
@@ -1116,7 +1118,7 @@ Do NOT spin up new Grafana, Prometheus, or InfluxDB instances. All HypeReels obs
 
 - **Status:** Accepted
 - **Context:** PM2's `env_file` option is silently ignored in `ecosystem.config.cjs` (issues #4, #7). The only working alternative in PM2 is to inline all environment variables directly in the config file, which is a security and maintenance regression — secrets visible in a checked-in or world-readable file.
-- **Decision:** Native systemd unit (`server/hypereels-api.service`) with `EnvironmentFile=/opt/hypereels/.env` is the recommended production process manager for all bare-metal/LXC profiles (Profile 1: single Proxmox host, Profile 3: Production Case+Quorra). `systemctl enable --now hypereels-api` replaces `pm2 start`. Profile 2 (Unraid Docker Compose) uses Docker's native `env_file` directive. `ecosystem.config.cjs` is retained as a development convenience only with a prominent warning comment.
+- **Decision:** Native systemd unit (`server/hypereels-api.service`) with `EnvironmentFile=/opt/hypereels/app/.env` and `WorkingDirectory=/opt/hypereels/app/server` is the recommended production process manager for all bare-metal/LXC profiles (Profile 1: single Proxmox host, Profile 3: Production Case+Quorra). `systemctl enable --now hypereels-api` replaces `pm2 start`. Profile 2 (Unraid Docker Compose) uses Docker's native `env_file` directive. `ecosystem.config.cjs` is retained as a development convenience only with a prominent warning comment.
 - **Consequences:** `systemctl start|stop|restart|status hypereels-api` replaces `pm2` commands. `journalctl -u hypereels-api -f` replaces `pm2 logs`. Logs are appended to `/var/log/hypereels/api.log` and `/var/log/hypereels/api-error.log` (the log directory must exist before service start). `LimitNOFILE=65536` prevents open-file exhaustion under load.
 
 ---
@@ -1130,7 +1132,6 @@ Do NOT spin up new Grafana, Prometheus, or InfluxDB instances. All HypeReels obs
 
 ---
 
-> **Next step:** Architecture is ready in `docs/architecture.md`. Steps 3–5 can now run in parallel:
-> - Invoke `@frontend-engineer` for UI implementation
-> - Invoke `@backend-engineer` for API and business logic
-> - Invoke `@ai-ml-engineer` for video analysis and audio sync pipelines
+> **Status (as of 2026-04-19):** All MVP implementation complete. All 5 PRs merged to main, all 8 GitHub issues closed.
+> Frontend (React SPA), backend (Fastify API + BullMQ workers), and Python workers (librosa, InsightFace, FFmpeg) are fully implemented.
+> Deployment docs: `docs/infrastructure.md` (Production/Profile 3), `docs/deployment/profile-1-cpu.md`, `docs/deployment/profile-2-gpu.md`.
