@@ -1,106 +1,152 @@
-# Profile 2 — GPU Self-Hosted (Unraid)
+# Profile 2 — GPU-Enabled (Single Machine)
 
-> **Deployment overview:** All services in a single `docker-compose.yml` on a single Unraid host. GPU passthrough to the Python worker container enables faster InsightFace inference. Managed by Docker Compose with `restart: unless-stopped` policies.
-
----
-
-## Service Layout
-
-All services run as Docker containers on a single Unraid host:
-
-| Container | Image | Role | GPU |
-|-----------|-------|------|-----|
-| `hypereels-api` | `hypereels-api:latest` | Fastify API + static SPA | No |
-| `hypereels-postgres` | `postgres:18` | PostgreSQL database | No |
-| `hypereels-redis` | `redis:7-alpine` | BullMQ queues + pub/sub | No |
-| `hypereels-minio` | `minio/minio` | Object storage (S3-compatible) | No |
-| `hypereels-worker` | `hypereels-worker:latest` | Python workers (InsightFace, librosa, FFmpeg) | Yes (NVIDIA) |
-
-**Key design decisions:**
-- All Docker, managed by a single `docker-compose.yml`
-- GPU passthrough via NVIDIA Container Runtime (`deploy.resources.reservations.devices`)
-- Operator is responsible for GPU scheduling — ensure no other container (e.g., Frigate NVR) holds an exclusive GPU lock that blocks the worker
-- PostgreSQL + Redis accessed via Docker service names (internal Docker network)
-- SPA served by `@fastify/static` from volume-mounted `client-dist/`
-- Process management: Docker Compose `restart: unless-stopped`
+> **Deployment overview:** All HypeReels services run as Docker containers in a single `docker-compose.yml` on one machine. An NVIDIA GPU is **optional** — InsightFace automatically falls back to CPU inference if no GPU is detected. GPU passthrough to the worker container uses the NVIDIA Container Runtime.
 
 ---
 
-## 1. Prerequisites
-
-- **Unraid 6.12+** with Docker support enabled
-- **NVIDIA GPU** (GTX 1070 or better recommended for InsightFace GPU inference)
-- NVIDIA Unraid plugin installed (see Section 2)
-- `docker compose` v2 available (`docker compose version`)
-- Git available on Unraid: install from Unraid Community Applications (NerdTools or similar)
-- A reverse proxy on the LAN (Nginx Proxy Manager, Caddy, or Nginx) — see Section 8
-
-**GPU requirement note:** Profile 2 enables GPU passthrough to the worker container. If your GPU is shared with other containers (e.g., Frigate NVR), ensure those containers do not hold an exclusive lock that prevents the HypeReels worker from acquiring GPU time. If GPU contention is a problem, run the worker CPU-only by removing the `deploy.resources.reservations.devices` section from `docker-compose.yml`.
+> ### Reference Implementation
+>
+> **Quorra** (Unraid host, NVIDIA GTX 1080 Ti): Unraid 7.2.2, NVIDIA Container Runtime via Unraid NVIDIA plugin.
+> The instructions below are written generically for any self-hoster with a Docker-capable Linux machine. Quorra-specific paths appear only here.
+>
+> | Container | Unraid data path |
+> |-----------|-----------------|
+> | PostgreSQL | `/mnt/user/appdata/hypereels-postgres` |
+> | MinIO | `/mnt/user/appdata/hypereels-minio` |
+> | Worker temp | `/mnt/cache/appdata/hypereels/tmp` |
+>
+> Replace all `<PLACEHOLDER>` values with your own paths when following the guide below.
 
 ---
 
-## 2. NVIDIA Container Runtime Setup
+## Hardware Prerequisites
 
-### Install the Unraid NVIDIA Plugin
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| CPU | 4 cores / 8 threads at 2.0 GHz | 8+ cores |
+| RAM | 16 GB | 32 GB |
+| Storage — OS + services | 30 GB SSD | 50 GB NVMe |
+| Storage — data volume (MinIO) | 200 GB | 500 GB+ |
+| Network | Static IP or DHCP reservation | Gigabit LAN |
+| GPU | None required (CPU fallback) | NVIDIA with 4+ GB VRAM |
+
+**Required software:**
+- Docker Engine 24+ with Docker Compose v2
+- `nvidia-container-toolkit` (if using GPU acceleration)
+
+> **GPU is optional.** If no NVIDIA GPU is present, or if `nvidia-container-toolkit` is not installed, InsightFace falls back to `CPUExecutionProvider` automatically. You do not need to modify any configuration — the fallback is handled in the worker's startup code. The only difference between GPU and CPU mode is InsightFace inference speed.
+
+---
+
+## 1. Install Docker Engine
+
+```bash
+# Debian / Ubuntu
+apt-get update
+apt-get install -y ca-certificates curl gnupg lsb-release
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/debian \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+systemctl enable docker
+systemctl start docker
+docker run --rm hello-world
+```
+
+---
+
+## 2. NVIDIA Container Toolkit Setup (GPU Only)
+
+Skip this section if you are running CPU-only.
+
+### Generic Linux (non-Unraid)
+
+```bash
+# Add NVIDIA Container Toolkit repository
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey \
+  | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list \
+  | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' \
+  | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+apt-get update
+apt-get install -y nvidia-container-toolkit
+
+# Configure Docker to use the NVIDIA runtime
+nvidia-ctk runtime configure --runtime=docker
+systemctl restart docker
+```
+
+### Unraid
 
 1. In Unraid, go to **Apps** (Community Applications plugin required)
 2. Search for **NVIDIA Driver**
 3. Install the NVIDIA Driver plugin
 4. Reboot Unraid after installation
 
-### Verify GPU is accessible
+### Verify GPU passthrough works
 
 ```bash
-# On Unraid terminal
+# Confirm nvidia-smi works on the host
 nvidia-smi
-# Should show your GPU model, driver version, and CUDA version
 
+# Confirm Docker GPU passthrough works
 docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi
-# Should show the same GPU info — confirms Docker GPU passthrough works
-```
+# Should show the same GPU info
 
-If the above fails, verify the NVIDIA runtime is configured:
-
-```bash
+# Confirm the NVIDIA runtime is registered
 docker info | grep -i runtime
 # Should include: nvidia
 ```
 
 ---
 
-## 3. Clone Repo to Unraid
+## 3. Clone the Repo
 
 ```bash
-# On the Unraid terminal
-mkdir -p /mnt/user/appdata/hypereels
-git clone https://github.com/<ORG>/hypereels.git /mnt/user/appdata/hypereels
-cd /mnt/user/appdata/hypereels
+mkdir -p /opt/hypereels
+git clone https://github.com/<ORG>/hypereels.git /opt/hypereels/app
+cd /opt/hypereels/app
 ```
+
+> **Unraid path:** `mkdir -p /mnt/user/appdata/hypereels && git clone https://github.com/<ORG>/hypereels.git /mnt/user/appdata/hypereels`
 
 ---
 
 ## 4. Configure Environment Files
 
-Create the following `.env` files in `/mnt/user/appdata/hypereels/`:
-
-### `.env` — API and shared config
-
 ```bash
-cat > /mnt/user/appdata/hypereels/.env << 'EOF'
-# ── Database ───────────────────────────────────────────────────────────────────
+# ── Main .env — API and shared config ─────────────────────────────────────────
+cat > /opt/hypereels/app/.env << 'EOF'
+# ── Database (Docker service name) ────────────────────────────────────────────
 DATABASE_URL=postgresql://hypereels:<POSTGRES_PASSWORD>@hypereels-postgres:5432/hypereels
 DATABASE_SSL=false
 
-# ── Redis ─────────────────────────────────────────────────────────────────────
+# ── Redis (Docker service name) ───────────────────────────────────────────────
 REDIS_URL=redis://:<REDIS_PASSWORD>@hypereels-redis:6379
 REDIS_PASSWORD=<REDIS_PASSWORD>
 
 # ── MinIO ─────────────────────────────────────────────────────────────────────
+# Internal endpoint uses Docker service name
 MINIO_ENDPOINT=http://hypereels-minio:9000
 MINIO_ACCESS_KEY_ID=<MINIO_SERVICE_ACCOUNT_KEY>
 MINIO_SECRET_ACCESS_KEY=<MINIO_SERVICE_ACCOUNT_SECRET>
 MINIO_BUCKET=hypereels
-MINIO_PUBLIC_URL=http://<UNRAID_HOST_IP>:9000/hypereels
+# Public URL must use the HOST IP — presigned URLs are resolved by the browser,
+# which is outside the Docker network.
+MINIO_PUBLIC_URL=http://<HOST_IP>:9000/hypereels
 
 # Legacy R2_* aliases — mirrors MINIO_* above
 R2_ENDPOINT=http://hypereels-minio:9000
@@ -108,7 +154,7 @@ R2_ACCESS_KEY_ID=<MINIO_SERVICE_ACCOUNT_KEY>
 R2_SECRET_ACCESS_KEY=<MINIO_SERVICE_ACCOUNT_SECRET>
 R2_BUCKET=hypereels
 R2_ACCOUNT_ID=local
-R2_PUBLIC_URL=http://<UNRAID_HOST_IP>:9000/hypereels
+R2_PUBLIC_URL=http://<HOST_IP>:9000/hypereels
 
 # ── API server ────────────────────────────────────────────────────────────────
 PORT=3001
@@ -123,14 +169,21 @@ PYTHON_TIMEOUT_MS=300000
 PYTHON_WORKER_AUDIO_TIMEOUT_MS=300000
 PYTHON_WORKER_ASSEMBLY_TIMEOUT_MS=900000
 
-# ── InsightFace ───────────────────────────────────────────────────────────────
+# ── InsightFace — GPU with automatic CPU fallback ─────────────────────────────
+# When GPU is available: CUDAExecutionProvider is tried first.
+# When GPU is unavailable: CPUExecutionProvider is used automatically.
+# No manual change is needed — the worker handles the fallback internally.
 INSIGHTFACE_MODEL=buffalo_l
+INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
 INSIGHTFACE_COSINE_THRESHOLD=0.45
 
 # ── FFmpeg ────────────────────────────────────────────────────────────────────
 FFMPEG_CRF=20
 FFMPEG_PRESET=fast
 FFMPEG_MAX_WIDTH=1920
+# Set FFMPEG_HWACCEL=nvenc to enable NVIDIA NVENC hardware encoding.
+# Requires a GPU with NVENC support (GTX 1060 or newer). Falls back to x264 if not set.
+# FFMPEG_HWACCEL=nvenc
 
 # ── Session & upload limits ───────────────────────────────────────────────────
 SESSION_TTL_HOURS=24
@@ -140,62 +193,56 @@ MAX_CLIP_DURATION_MS=300000
 MAX_CLIP_SIZE_BYTES=500000000
 MAX_AUDIO_DURATION_MS=600000
 GENERATION_TIMEOUT_MS=900000
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+METRICS_PATH=/metrics
 EOF
-chmod 600 /mnt/user/appdata/hypereels/.env
-```
+chmod 600 /opt/hypereels/app/.env
 
-### `.env.postgres` — PostgreSQL container
-
-```bash
-cat > /mnt/user/appdata/hypereels/.env.postgres << 'EOF'
+# ── PostgreSQL container env ───────────────────────────────────────────────────
+cat > /opt/hypereels/app/.env.postgres << 'EOF'
 POSTGRES_DB=hypereels
 POSTGRES_USER=hypereels
 POSTGRES_PASSWORD=<POSTGRES_PASSWORD>
 EOF
-chmod 600 /mnt/user/appdata/hypereels/.env.postgres
-```
+chmod 600 /opt/hypereels/app/.env.postgres
 
-### `.env.redis` — Redis container
-
-```bash
-cat > /mnt/user/appdata/hypereels/.env.redis << 'EOF'
+# ── Redis container env ────────────────────────────────────────────────────────
+cat > /opt/hypereels/app/.env.redis << 'EOF'
 REDIS_PASSWORD=<REDIS_PASSWORD>
 EOF
-chmod 600 /mnt/user/appdata/hypereels/.env.redis
-```
+chmod 600 /opt/hypereels/app/.env.redis
 
-### `.env.minio` — MinIO container
-
-```bash
-cat > /mnt/user/appdata/hypereels/.env.minio << 'EOF'
+# ── MinIO container env ────────────────────────────────────────────────────────
+cat > /opt/hypereels/app/.env.minio << 'EOF'
 MINIO_ROOT_USER=<MINIO_ROOT_USER>
 MINIO_ROOT_PASSWORD=<MINIO_ROOT_PASSWORD>
 EOF
-chmod 600 /mnt/user/appdata/hypereels/.env.minio
+chmod 600 /opt/hypereels/app/.env.minio
+```
+
+**Generate strong passwords:**
+```bash
+openssl rand -base64 32  # run once per secret
 ```
 
 ---
 
-## 5. Build SPA
-
-On your developer machine (or on the Unraid host if Node.js is installed):
+## 5. Build the SPA
 
 ```bash
-cd /mnt/user/appdata/hypereels/client
+cd /opt/hypereels/app/client
 npm install
 npm run build
-# Output in client/dist/
-
-# Copy SPA into API's static serving directory
-cp -r /mnt/user/appdata/hypereels/client/dist \
-      /mnt/user/appdata/hypereels/server/client-dist
+# Copy output to API's static serving directory
+cp -r dist ../server/client-dist
 ```
 
 ---
 
 ## 6. docker-compose.yml
 
-Create or review `/mnt/user/appdata/hypereels/docker-compose.yml`:
+This file includes GPU passthrough for the worker. If you are running CPU-only (no GPU or `nvidia-container-toolkit` not installed), remove or comment out the `deploy` section in the `worker` service — everything else stays the same.
 
 ```yaml
 services:
@@ -232,7 +279,7 @@ services:
     env_file:
       - .env.postgres
     volumes:
-      - /mnt/user/appdata/hypereels-postgres:/var/lib/postgresql/data
+      - /opt/hypereels/data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hypereels -d hypereels"]
       interval: 10s
@@ -276,7 +323,7 @@ services:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - /mnt/user/appdata/hypereels-minio:/data
+      - /opt/hypereels/data/minio:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -285,7 +332,7 @@ services:
     networks:
       - hypereels
 
-  # ── Python Worker (GPU-enabled) ───────────────────────────────────────────────
+  # ── Python Worker (GPU-enabled with CPU fallback) ─────────────────────────────
   worker:
     image: hypereels-worker:latest
     build:
@@ -301,7 +348,8 @@ services:
       - PORT=8000
       - FFMPEG_PATH=/usr/bin/ffmpeg
     volumes:
-      - /mnt/cache/appdata/hypereels/tmp:/tmp/hypereels
+      - /tmp/hypereels:/tmp/hypereels
+    # GPU passthrough — remove this 'deploy' section to force CPU-only mode
     deploy:
       resources:
         reservations:
@@ -327,34 +375,33 @@ volumes:
   hypereels-redis-data:
 ```
 
-**Note on `MINIO_PUBLIC_URL`:** The value in `.env` uses the Unraid host IP (`<UNRAID_HOST_IP>:9000`) rather than the Docker service name. This is because presigned URLs are resolved by the **browser**, which is outside the Docker network and cannot resolve `hypereels-minio`. Use the actual LAN IP of your Unraid host.
+> **Unraid data paths:** Replace `/opt/hypereels/data/postgres` with `/mnt/user/appdata/hypereels-postgres`, `/opt/hypereels/data/minio` with `/mnt/user/appdata/hypereels-minio`, and `/tmp/hypereels` with `/mnt/cache/appdata/hypereels/tmp`.
+
+**To run CPU-only (remove GPU passthrough):** Delete or comment out the `deploy` block in the `worker` service. InsightFace will use `CPUExecutionProvider` because `INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider` — CUDA is tried first, fails gracefully, and CPU is used. No other changes needed.
+
+**To check for GPU contention:** If another container on your machine uses the GPU 24/7 (e.g., a home security NVR), InsightFace may fall back to CPU when that container holds an exclusive lock. To avoid any contention, remove the `deploy` section — CPU-only mode guarantees no GPU scheduling conflicts.
 
 ---
 
 ## 7. Start Services
 
 ```bash
-cd /mnt/user/appdata/hypereels
+cd /opt/hypereels/app
 
-# Build images first
+# Build images
 docker compose build
 
 # Start all services
 docker compose up -d
 
-# Check all containers are running
+# Check status
 docker compose ps
 ```
 
 ### Run migrations (first boot only)
 
-Wait for PostgreSQL to be healthy, then apply schema migrations:
-
 ```bash
-# Check PostgreSQL is healthy
-docker exec hypereels-postgres pg_isready -U hypereels -d hypereels
-
-# Apply migrations
+# Wait for PostgreSQL to be healthy, then apply schema migrations
 for f in \
   server/src/db/migrations/001_initial_schema.sql \
   server/src/db/migrations/002_rename_r2_key_to_minio_key.sql \
@@ -371,17 +418,13 @@ docker exec hypereels-postgres psql -U hypereels -d hypereels -c "\dt"
 ### Create MinIO bucket and lifecycle rule
 
 ```bash
-# Wait for MinIO to be healthy
-docker exec hypereels-minio mc alias set local http://localhost:9000 \
-  "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
-
-# Read credentials from env file
-source /mnt/user/appdata/hypereels/.env.minio
+source /opt/hypereels/app/.env.minio
 
 docker exec hypereels-minio mc alias set local http://localhost:9000 \
   "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
 docker exec hypereels-minio mc mb --ignore-existing local/hypereels
-docker exec hypereels-minio mc ilm rule add local/hypereels --expire-days 2 --tags "session_ttl=true"
+docker exec hypereels-minio mc ilm rule add local/hypereels \
+  --expire-days 2 --tags "session_ttl=true"
 docker exec hypereels-minio mc ilm rule ls local/hypereels
 ```
 
@@ -389,7 +432,7 @@ docker exec hypereels-minio mc ilm rule ls local/hypereels
 
 ## 8. Reverse Proxy Setup
 
-Choose any reverse proxy. The API listens on port 3001 on the Unraid host.
+The API listens on port 3001 on the host. Point your reverse proxy at `http://<HOST_IP>:3001`.
 
 ### Pre-flight: Cloudflare Tunnel (if applicable)
 
@@ -405,7 +448,7 @@ If using a Cloudflare Zero Trust tunnel for external HTTPS access:
 >    - Subdomain: `<YOUR_SUBDOMAIN>`
 >    - Domain: `<YOUR_DOMAIN>`
 >    - Type: HTTP
->    - URL: `<UNRAID_HOST_IP>` (or your reverse proxy IP if separate)
+>    - URL: `<HOST_IP>` (or your reverse proxy IP if separate)
 > 4. Save and wait ~60 seconds for DNS propagation
 > 5. Verify: `curl -I https://<YOUR_DOMAIN>` should reach the proxy
 > 6. NOW request the Let's Encrypt certificate
@@ -414,7 +457,7 @@ If using a Cloudflare Zero Trust tunnel for external HTTPS access:
 
 ```
 Domain Names:        <YOUR_DOMAIN>
-Forward Hostname/IP: <UNRAID_HOST_IP>
+Forward Hostname/IP: <HOST_IP>
 Forward Port:        3001
 Websockets Support:  ON
 SSL:                 Request Let's Encrypt certificate
@@ -435,7 +478,7 @@ add_header Strict-Transport-Security "max-age=31536000" always;
 
 ```caddyfile
 <YOUR_DOMAIN> {
-  reverse_proxy <UNRAID_HOST_IP>:3001
+  reverse_proxy <HOST_IP>:3001
   header Strict-Transport-Security "max-age=31536000"
 }
 ```
@@ -444,24 +487,36 @@ add_header Strict-Transport-Security "max-age=31536000" always;
 
 ## 9. GPU Verification
 
-```bash
-# Verify GPU is accessible inside the worker container
-docker exec hypereels-worker python -c "import torch; print('CUDA available:', torch.cuda.is_available()); print('Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N/A')"
-# Expected: CUDA available: True  Device: <your GPU name>
+After the worker container starts, verify GPU mode:
 
-# Verify InsightFace can use the GPU
+```bash
+# Check GPU is visible inside the container
+docker exec hypereels-worker nvidia-smi
+# Expected: GPU model, driver version, CUDA version
+
+# Check InsightFace startup logs for GPU/CPU mode
+docker logs hypereels-worker 2>&1 | grep -i "provider\|cuda\|cpu"
+# GPU mode: "Applied providers: ['CUDAExecutionProvider']"
+# CPU mode: "Applied providers: ['CPUExecutionProvider']" with warning "GPU not available"
+
+# Check InsightFace can use the GPU directly
 docker exec hypereels-worker python -c "
 import insightface
 app = insightface.app.FaceAnalysis(name='buffalo_l')
-app.prepare(ctx_id=0)  # ctx_id=0 means GPU; ctx_id=-1 would be CPU
-print('InsightFace loaded on GPU successfully')
-"
+app.prepare(ctx_id=0)  # ctx_id=0 = GPU; ctx_id=-1 = CPU
+print('InsightFace mode: GPU')
+" 2>&1 || echo "GPU not available — CPU mode active"
 ```
 
-If you see `CUDA available: False`, verify:
-1. The NVIDIA plugin is installed and the host shows `nvidia-smi`
-2. The `deploy.resources.reservations.devices` section is in `docker-compose.yml`
-3. No other container holds an exclusive GPU lock
+**If `nvidia-smi` fails inside the container:**
+1. Verify `nvidia-smi` works on the host
+2. Confirm `docker info | grep nvidia` shows the NVIDIA runtime
+3. Check the `deploy.resources.reservations.devices` section is present in `docker-compose.yml`
+4. Ensure no other container holds an exclusive GPU lock
+
+**To force CPU-only mode:** Remove the `deploy` section from the `worker` service in `docker-compose.yml` and run `docker compose up -d worker`.
+
+**NVENC hardware encoding (FFmpeg):** Uncomment `FFMPEG_HWACCEL=nvenc` in `.env` to enable NVIDIA hardware video encoding. This requires a GPU with NVENC support (GTX 1060 or newer). If NVENC is unavailable or the env var is not set, FFmpeg falls back to software (x264) encoding automatically.
 
 ---
 
@@ -471,7 +526,7 @@ After all services are running:
 
 ```bash
 # 1. API health
-curl http://<UNRAID_HOST_IP>:3001/health
+curl http://<HOST_IP>:3001/health
 # {"status":"ok"}
 
 # 2. API via domain
@@ -479,7 +534,7 @@ curl https://<YOUR_DOMAIN>/health
 # {"status":"ok"}
 
 # 3. Python workers health
-curl http://<UNRAID_HOST_IP>:8000/health
+curl http://<HOST_IP>:8000/health
 # {"status":"ok","service":"hypereels-python-worker"}
 
 # 4. Redis connectivity
@@ -491,11 +546,16 @@ docker exec hypereels-postgres pg_isready -U hypereels -d hypereels
 # /var/run/postgresql:5432 - accepting connections
 
 # 6. MinIO Console
-# Open http://<UNRAID_HOST_IP>:9001 in your browser
+# Open http://<HOST_IP>:9001 in your browser
 # Log in with MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
 # Confirm the "hypereels" bucket exists with the ILM rule
 
-# 7. UI
+# 7. GPU status (if applicable)
+docker exec hypereels-worker nvidia-smi
+# Or confirm CPU fallback:
+docker logs hypereels-worker 2>&1 | grep -i provider
+
+# 8. UI
 # Open https://<YOUR_DOMAIN> in your browser
 # The HypeReels upload wizard should load
 ```
@@ -504,35 +564,27 @@ docker exec hypereels-postgres pg_isready -U hypereels -d hypereels
 
 ## 11. Backup
 
-### PostgreSQL — nightly pg_dump via cron
-
-Unraid supports cron via the User Scripts plugin (Community Applications) or manually via `/etc/cron.d/`:
+### PostgreSQL — nightly pg_dump
 
 ```bash
-# /etc/cron.d/hypereels-backup (on Unraid)
+# /etc/cron.d/hypereels-backup (adjust path for Unraid: /etc/cron.d/ or User Scripts plugin)
 0 2 * * * root docker exec hypereels-postgres pg_dump -U hypereels hypereels | \
-  gzip > /mnt/user/backups/hypereels/postgres-$(date +\%Y\%m\%d).sql.gz
+  gzip > /opt/hypereels/backups/postgres-$(date +\%Y\%m\%d).sql.gz
 ```
 
 ### Redis — AOF persistence
 
 Redis is configured with `appendonly yes` — queue data survives container restarts. The `hypereels-redis-data` named volume persists across `docker compose down` (but not `docker compose down -v`).
 
-For off-container backup:
-
 ```bash
-# Copy AOF to backup location
+# Off-container AOF backup
 docker exec hypereels-redis cat /data/appendonly.aof | \
-  gzip > /mnt/user/backups/hypereels/redis-$(date +%Y%m%d).aof.gz
+  gzip > /opt/hypereels/backups/redis-$(date +%Y%m%d).aof.gz
 ```
 
 ### MinIO data
 
-MinIO data is stored at `/mnt/user/appdata/hypereels-minio` on the Unraid array. Unraid's built-in backup (Unraid backup plugin or rclone) covers this directory.
-
-### Docker Compose config
-
-Back up `/mnt/user/appdata/hypereels/` (excluding large data directories) to ensure the compose file, `.env` files, and `client-dist/` are recoverable.
+MinIO data is stored at the bind mount path in `docker-compose.yml` (`/opt/hypereels/data/minio` or the Unraid equivalent). Back this up with your normal host backup tool (Unraid backup plugin, rclone, rsync, etc.).
 
 ---
 
@@ -540,34 +592,35 @@ Back up `/mnt/user/appdata/hypereels/` (excluding large data directories) to ens
 
 ### Worker container exits immediately
 
-Check logs:
-
 ```bash
 docker compose logs worker --tail 50
 ```
 
 Common causes:
-- Missing `.env` — verify all `<PLACEHOLDER>` values are filled in
-- PostgreSQL or Redis not yet healthy — the `depends_on` healthcheck should handle this, but re-run `docker compose up -d` if services started out of order
-- InsightFace model download failed — the container tries to download `buffalo_l` on first start; ensure the Unraid host has internet access
+- Missing or incomplete `.env` — verify all `<PLACEHOLDER>` values are filled in
+- PostgreSQL or Redis not yet healthy — re-run `docker compose up -d` if services started out of order
+- InsightFace model download failed — the container tries to download `buffalo_l` on first start; ensure the host has internet access
 
 ### GPU not detected in worker
 
 ```bash
 docker exec hypereels-worker nvidia-smi
-# If this fails: the GPU is not passed through — check NVIDIA plugin and docker-compose.yml
 ```
 
-Remove the `deploy.resources.reservations.devices` section to fall back to CPU-only mode.
+If this fails:
+1. Verify `nvidia-smi` works on the host
+2. Verify `nvidia-container-toolkit` is installed and Docker is configured to use it (`docker info | grep nvidia`)
+3. Check the `deploy.resources.reservations.devices` section is present in `docker-compose.yml`
+
+To fall back to CPU mode without further debugging, remove the `deploy` section from the `worker` service and re-run `docker compose up -d worker`.
 
 ### MinIO presigned URLs not accessible from browser
 
-The `MINIO_PUBLIC_URL` and `R2_PUBLIC_URL` in `.env` must use the Unraid host's LAN IP, not `hypereels-minio`. Presigned URLs are resolved by the browser, which is outside the Docker network.
+`MINIO_PUBLIC_URL` (and `R2_PUBLIC_URL`) in `.env` must use the **host's LAN IP**, not `hypereels-minio`. Presigned URLs are resolved by the browser, which is outside the Docker network.
 
 ```bash
-# Verify the correct value is set
-grep MINIO_PUBLIC_URL /mnt/user/appdata/hypereels/.env
-# Should be: MINIO_PUBLIC_URL=http://<UNRAID_HOST_IP>:9000/hypereels
+grep MINIO_PUBLIC_URL /opt/hypereels/app/.env
+# Should be: MINIO_PUBLIC_URL=http://<HOST_IP>:9000/hypereels
 ```
 
 ### Containers keep restarting
@@ -577,4 +630,21 @@ docker compose ps      # Check Status column
 docker compose logs    # Check all logs at once
 ```
 
-Check that all `<PLACEHOLDER>` values are replaced — the most common cause of restart loops is a missing or incorrect `DATABASE_URL` or `REDIS_URL`.
+The most common cause is a missing or incorrect `DATABASE_URL` or `REDIS_URL`. Verify all `<PLACEHOLDER>` values are replaced.
+
+### Checking for GPU contention
+
+If another container on your machine uses the GPU (e.g., Frigate NVR, a media transcoder), run:
+
+```bash
+nvidia-smi
+# Look for processes listed under "Processes" — any process holding exclusive context
+# will prevent other containers from acquiring GPU time
+```
+
+To see which Docker containers have GPU access:
+```bash
+docker inspect $(docker ps -q) | grep -A 10 '"DeviceRequests"'
+```
+
+If GPU contention is confirmed and affects HypeReels, remove the `deploy` section from the worker service to run CPU-only. InsightFace will detect the GPU is unavailable and log a warning before falling back to CPU inference automatically.

@@ -10,6 +10,8 @@
 > **Self-Hosted Only — No Managed Cloud Services**
 > The MVP runs entirely on on-premises hardware. No AWS, Cloudflare, Railway, Neon, Upstash, or any other managed SaaS infrastructure is permitted. All services must be open-source and self-hosted.
 
+> **Single-System Deployment (E10 update):** The canonical deployment model is a **single machine** running all services. The workload allocation table below reflects the Case+Quorra reference environment (Profile 3, now retired). For new deployments, all services (API, PostgreSQL, Redis, MinIO, Python workers) co-locate on one machine. See `docs/deployment/profile-1-cpu.md` (CPU-only) and `docs/deployment/profile-2-gpu.md` (GPU-enabled) for generic self-hoster instructions.
+
 ### Available Hardware
 
 #### Case — Proxmox Host (192.168.1.122)
@@ -80,6 +82,7 @@
 | E7: Download & Cleanup | STORY-015, STORY-016 | One-shot download and permanent deletion |
 | E8: Error Handling & Edge Cases | STORY-017, STORY-018, STORY-019 | Global error surfaces and recovery paths |
 | E9: On-Premises Deployment | STORY-020, STORY-021 | Deploy full stack to self-hosted infrastructure; resolve GPU contention |
+| E10: Generic Self-Hoster Deployment | STORY-022, STORY-023, STORY-024, STORY-025, STORY-026 | Hardware-agnostic single-system deployment profiles; retire split-system Profile 3 |
 
 ---
 
@@ -635,6 +638,8 @@ As a user, I want a clear visual indicator of where I am in the HypeReels workfl
 
 ### [STORY-020] Deploy Full Stack to On-Premises Infrastructure
 
+> **Superseded by STORY-023 (CPU-only single machine) and STORY-024 (GPU-enabled single machine) as canonical deployment models. STORY-020 remains as a Case/Quorra-specific reference implementation only — the split-system (two-server) approach it describes is retired as a supported production mode.**
+
 **User Story**
 As a system operator, I want the complete HypeReels application deployed and running on our two on-premises servers so that the product is accessible to end users without relying on any managed cloud services.
 
@@ -703,21 +708,181 @@ As a system operator, I want visibility into InsightFace CPU inference duration 
 
 ---
 
+## E10: Generic Self-Hoster Deployment
+
+> **Context:** STORY-020 describes a split-system deployment (Case + Quorra simultaneously). That model is superseded by the stories in this epic. All new deployment work uses one of two single-system profiles. STORY-020 remains in the backlog as a reference implementation for the specific Case+Quorra environment only; it should NOT be treated as the canonical deployment model going forward.
+
+### [STORY-022] Publish Generic Hardware Requirements and Prerequisites for Self-Hosters
+
+**User Story**
+As a self-hoster who wants to run HypeReels on my own hardware, I want clear, hardware-agnostic prerequisites and minimum system requirements documented so that I can determine whether my machine is capable before attempting deployment.
+
+**Acceptance Criteria**
+- [ ] Given a prospective self-hoster reads the deployment documentation, when they review the prerequisites section, then they find a minimum hardware requirements table listing: minimum CPU (e.g., 4 cores / 8 threads at 2.0 GHz or faster), minimum RAM (8 GB for CPU-only, 16 GB recommended for GPU-enabled), minimum storage (30 GB for services + dedicated data volume of 200 GB+), and network (LAN with static IP or DHCP reservation for the deployment host).
+- [ ] Given the prerequisites section is read, when a self-hoster reviews it, then it lists required software dependencies by profile: Proxmox VE 8.x+ OR Docker Engine 24+ with Docker Compose v2 (no proprietary platform required).
+- [ ] Given the documentation is written, when a self-hoster follows it, then no reference is made to Case (192.168.1.122) or Quorra (192.168.1.100) as required infrastructure — all IP addresses and hostnames are written as `<PLACEHOLDER>` variables.
+- [ ] Given the documentation refers to example hardware, when Case or Quorra are mentioned, then they appear only in clearly-labelled "Example reference implementation" callout boxes and are never presented as prerequisites.
+- [ ] Given the self-hoster has a CPU-only machine (no GPU), when they read the prerequisites, then the CPU-only profile is clearly identified as the path for their setup with no GPU-related steps required.
+- [ ] Given the self-hoster has a machine with an NVIDIA GPU, when they read the prerequisites, then the GPU-enabled profile is identified as their path, and the document explains that the GPU is optional — the profile gracefully falls back to CPU if no GPU is present.
+- [ ] Given the documentation is published, when a self-hoster searches for "minimum requirements", then they can find a single authoritative section rather than scattered references across multiple files.
+
+**Out of Scope**
+- AMD or Intel GPU support (NVIDIA only for GPU-enabled profile)
+- Cloud deployment (AWS, GCP, Azure) — self-hosted only
+- Automated hardware detection or validation scripts
+
+**Open Questions**
+- Should there be a formal `SYSTEM_CHECK.sh` script that validates prerequisites before deployment begins? (Recommended P2 enhancement — not required for this story.)
+- Is there a minimum storage IOPS requirement for MinIO? (Engineering to confirm.)
+
+**Size:** S
+**Priority:** P0 (must-have)
+**Sprint:** MVP
+
+---
+
+### [STORY-023] Deploy HypeReels CPU-Only on a Single Machine (All Services Co-located)
+
+**User Story**
+As a self-hoster with a capable CPU-only machine (no GPU), I want to deploy all HypeReels services on that single machine using a documented, near-single-command procedure so that I can run the full application without GPU hardware.
+
+**Acceptance Criteria**
+- [ ] Given a machine meeting the CPU-only minimum requirements, when the self-hoster follows the CPU-only deployment guide, then all five services (API + PostgreSQL + Redis, Python workers, MinIO) are running on that single machine — nothing is split across multiple hosts.
+- [ ] Given the CPU-only profile, when the self-hoster brings up the stack, then a single `docker compose up -d` (or equivalent LXC provisioning script) starts all services and reports healthy status for each container/service within 5 minutes on a machine with internet access.
+- [ ] Given the InsightFace worker is deployed in CPU-only mode, when it processes a clip, then it runs with `ctx_id=-1` (CPUExecutionProvider) and does NOT require or use any GPU — the worker container is launched without `--gpus all` and without the NVIDIA runtime.
+- [ ] Given FFmpeg is deployed in CPU-only mode, when the video rendering worker encodes a HypeReel, then it uses software encoding (x264/libx264) with no NVENC or hardware acceleration flags.
+- [ ] Given all services are on a single machine, when the API needs to communicate with PostgreSQL, Redis, or MinIO, then it connects via localhost or Docker internal network — no cross-host networking is required.
+- [ ] Given the deployment completes, when the self-hoster runs the smoke test script (`scripts/smoke-test.sh` or equivalent), then all health checks pass: `/health` on the API returns `{"status":"ok"}`, the Python worker health endpoint returns `{"status":"ok"}`, Redis responds to `PING`, PostgreSQL accepts connections, and the MinIO bucket exists.
+- [ ] Given the stack is running, when an end-user completes the full seven-step workflow (upload clips → upload song → person detection → highlight selection → review → generate → download), then each step completes successfully end-to-end on CPU-only hardware.
+- [ ] Given the deployment guide is followed, when the self-hoster encounters the InsightFace model download step, then the guide documents both the online path (automatic download on first start) and the offline path (pre-download and volume-mount the `buffalo_l` model pack).
+- [ ] Given the machine restarts, when it comes back online, then all services restart automatically (Docker Compose `restart: unless-stopped` or LXC/systemd autostart equivalent) without manual intervention.
+- [ ] Given the CPU-only guide references the Case/Proxmox reference implementation, when Case is mentioned, then it appears only as "Example: Proxmox host (CPU-only)" in a clearly labelled callout — the instructions remain valid for any Proxmox host or Docker-capable Linux machine.
+
+**Out of Scope**
+- GPU acceleration in this profile
+- Split-system deployment (services on multiple machines simultaneously)
+- Kubernetes or container orchestration beyond Docker Compose / Proxmox LXC
+- Windows or macOS as the host OS (Linux only)
+
+**Open Questions**
+- Should the CPU-only profile offer a Docker Compose path in addition to the Proxmox LXC path? (Recommended yes — broadens accessibility beyond Proxmox users. Architecture team to confirm feasibility and whether one `docker-compose.yml` can serve both profiles.)
+- What is the expected end-to-end generation time on a minimum-spec CPU-only machine? This sets user expectations and the job timeout value (`GENERATION_TIMEOUT_MS`).
+
+**Size:** L
+**Priority:** P0 (must-have)
+**Sprint:** MVP
+
+---
+
+### [STORY-024] Deploy HypeReels GPU-Enabled on a Single Machine (All Services Co-located)
+
+**User Story**
+As a self-hoster with a machine that has an NVIDIA GPU, I want to deploy all HypeReels services on that single machine with GPU acceleration available for InsightFace so that person detection runs faster, while the system gracefully falls back to CPU if the GPU is unavailable.
+
+**Acceptance Criteria**
+- [ ] Given a machine with an NVIDIA GPU meeting the minimum requirements, when the self-hoster follows the GPU-enabled deployment guide, then all five services (API, PostgreSQL, Redis, MinIO, Python workers) run as Docker containers on the single machine — nothing is split across multiple hosts.
+- [ ] Given the GPU-enabled profile, when the self-hoster brings up the stack, then a single `docker compose up -d` starts all services and reports healthy status within 5 minutes on a machine with internet access and the NVIDIA Container Runtime installed.
+- [ ] Given the worker container is started with GPU passthrough (`deploy.resources.reservations.devices` with `driver: nvidia, count: 1, capabilities: [gpu]`), when InsightFace initialises, then it uses `ctx_id=0` (CUDAExecutionProvider) and GPU inference is confirmed by the worker startup log.
+- [ ] Given the worker container cannot acquire GPU access (GPU locked by another process, driver error, or no GPU present), when the worker initialises, then InsightFace falls back automatically to `ctx_id=-1` (CPUExecutionProvider) and logs a warning: "GPU not available — falling back to CPU inference"; the service does NOT crash.
+- [ ] Given GPU passthrough is active, when the smoke test runs, then `docker exec hypereels-worker nvidia-smi` returns the GPU model and driver version; if no GPU is available, the command fails gracefully and the fallback is confirmed via the CPU-mode log message.
+- [ ] Given the deployment guide is followed, when the self-hoster encounters GPU-sharing concerns (e.g., another container such as a home security NVR uses the GPU), then the guide documents: (a) how to check for GPU contention (`nvidia-smi` and `docker inspect`), and (b) how to remove the `deploy.resources.reservations.devices` section to run CPU-only instead.
+- [ ] Given all services are on a single machine, when the API communicates with PostgreSQL, Redis, or MinIO, then all connections use Docker internal network service names — no cross-host networking is required.
+- [ ] Given the deployment completes, when the self-hoster runs the smoke test script, then all health checks pass: API health, worker health, Redis ping, PostgreSQL connection, MinIO bucket existence, and GPU accessibility (or confirmed CPU fallback).
+- [ ] Given the stack is running, when an end-user completes the full seven-step workflow end-to-end, then each step completes successfully — person detection uses GPU acceleration where available.
+- [ ] Given the machine restarts, when it comes back online, then all Docker containers restart automatically (`restart: unless-stopped`) without manual intervention.
+- [ ] Given the GPU-enabled guide references the Quorra/Unraid reference implementation, when Quorra is mentioned, then it appears only as "Example: Unraid host (GPU-enabled)" in a clearly labelled callout — the instructions remain valid for any Docker-capable Linux machine with an NVIDIA GPU.
+
+**Out of Scope**
+- AMD or Intel GPU support — NVIDIA CUDA only for GPU acceleration
+- Split-system deployment (services on multiple machines simultaneously)
+- Automated GPU scheduling or arbitration between HypeReels and other GPU-using applications (documented manual steps only)
+- Windows or macOS as the host OS (Linux only)
+
+**Open Questions**
+- Should FFmpeg NVENC hardware encoding be enabled by default in the GPU profile, or remain as an opt-in? (Engineering to confirm — NVENC availability depends on GPU model and driver version. Recommended: opt-in via `FFMPEG_HWACCEL=nvenc` env var.)
+- Is `docker compose` v2 the only supported orchestration method for the GPU profile, or should Podman with CDI also be documented?
+
+**Size:** L
+**Priority:** P0 (must-have)
+**Sprint:** MVP
+
+---
+
+### [STORY-025] Provide a Near-Single-Command Deployment with Health-Check Verification
+
+**User Story**
+As a self-hoster, I want to bring up the entire HypeReels stack with a single command (or a minimal sequence of documented steps) and have the system verify its own health so that I know immediately whether the deployment succeeded without needing deep operational knowledge.
+
+**Acceptance Criteria**
+- [ ] Given the self-hoster has completed prerequisite setup (cloned the repo, filled in `.env` files), when they run `docker compose up -d` (GPU profile) or the equivalent LXC bootstrap script (CPU/Proxmox profile), then all services start and reach a healthy state without further manual intervention.
+- [ ] Given all services are running, when the self-hoster runs `scripts/smoke-test.sh <HOST_IP>` (a shell script committed to the repo), then the script checks and reports pass/fail for each of the following: API `/health` returns HTTP 200 with `{"status":"ok"}`, Python worker `/health` returns HTTP 200 with `{"status":"ok","service":"hypereels-python-worker"}`, Redis responds to `PING` with `PONG`, PostgreSQL accepts a connection and `SELECT 1` succeeds, MinIO `/minio/health/live` returns HTTP 200, and the `hypereels` bucket exists.
+- [ ] Given the smoke test script runs, when any check fails, then the script outputs a clear, human-readable error message identifying which service failed and what the likely cause is (e.g., "MinIO bucket 'hypereels' not found — run: mc mb local/hypereels"), and exits with a non-zero code.
+- [ ] Given the smoke test script runs, when all checks pass, then the script outputs "All systems operational — HypeReels is ready" and exits 0.
+- [ ] Given the self-hoster needs to fill in configuration placeholders, when they open the `.env` template, then every required variable is documented with a comment explaining its purpose and a `<PLACEHOLDER>` marker, and the template includes instructions for generating strong random passwords (e.g., `openssl rand -base64 32`).
+- [ ] Given the deployment documentation describes the startup sequence, when the self-hoster follows it, then the documented steps from "prerequisites met" to "smoke test passes" require no more than 10 distinct shell commands (not counting individual `pct create` options or YAML content).
+- [ ] Given the self-hoster wants to stop the stack, when they run `docker compose down` (or the documented LXC stop command), then all services stop cleanly; no data is lost (volumes and bind mounts persist).
+- [ ] Given the deployment documentation includes a health-check section, when the self-hoster consults it after initial deployment, then it lists the expected healthy response for each service endpoint so they can manually verify without running the script.
+
+**Out of Scope**
+- Automated provisioning via Ansible, Terraform, or similar IaC tools — manual shell-script approach only for MVP
+- CI/CD pipeline integration for deployment automation
+- Container orchestration health dashboards (Grafana integration is handled by STORY-021)
+
+**Open Questions**
+- Should `scripts/smoke-test.sh` accept both the CPU-only profile (LXC IPs) and the GPU-enabled profile (single Docker host IP) via a `--profile` flag? (Recommended yes — single script, two modes.)
+- Should the script also verify inter-service connectivity (API can reach PostgreSQL, worker can reach Redis, etc.) beyond raw endpoint health checks?
+
+**Size:** M
+**Priority:** P0 (must-have)
+**Sprint:** MVP
+
+---
+
+### [STORY-026] Retire Split-System Profile 3 and Consolidate Deployment Documentation
+
+**User Story**
+As a system operator or contributor, I want the split-system "Profile 3" deployment (Case API + Quorra workers simultaneously) officially retired and all deployment documentation consolidated around the two single-system profiles so that no one accidentally attempts a hybrid deployment that is no longer supported.
+
+**Acceptance Criteria**
+- [ ] Given `docs/infrastructure.md` currently describes a split-system production deployment (API on Case, PostgreSQL on Quorra, workers on Quorra), when this story is complete, then `docs/infrastructure.md` is updated to clearly mark Profile 3 as retired with a deprecation notice at the top: "⚠️ DEPRECATED — Profile 3 (split-system) is no longer supported. Use Profile 1 (CPU-only) or Profile 2 (GPU-enabled) instead."
+- [ ] Given the deprecation notice is in place, when a contributor reads `docs/infrastructure.md`, then they are directed to `docs/deployment/profile-1-cpu.md` and `docs/deployment/profile-2-gpu.md` as the canonical deployment references.
+- [ ] Given the updated deployment documentation, when it references services (PostgreSQL, Redis, MinIO, API, workers), then ALL services are described as running on the SAME single machine for each profile — no story, doc, or diagram shows a configuration where some services run on Machine A and other services run on Machine B as a supported production mode.
+- [ ] Given STORY-020 described a split-system deployment, when contributors reference the backlog, then STORY-020 is marked with a superseded notice: "Superseded by STORY-023 (CPU-only) and STORY-024 (GPU-enabled) as canonical deployment models; STORY-020 remains as a Case/Quorra-specific reference implementation only."
+- [ ] Given the "Infrastructure Constraints" section at the top of `docs/user-stories.md` contains workload allocation tables that reference split-system assignments (e.g., PostgreSQL on Quorra, Redis on Case), when this story is complete, then that section is updated with a note clarifying: these assignments reflect the Case+Quorra reference environment only; single-system profiles co-locate all services on one machine.
+- [ ] Given the documentation is updated, when a self-hoster reads the deployment docs from the beginning, then they encounter exactly two deployment choices (CPU-only, GPU-enabled) with no mention of a third split-system option as an active path.
+- [ ] Given a developer searches the codebase for "Profile 3" or "split-system", when they find references, then each reference either points to the deprecation notice or is removed; no active documentation promotes Profile 3 as a deployment option.
+- [ ] Given the retirement is documented, when an operator who previously deployed with Profile 3 reads the migration note, then they find a brief migration guide explaining how to consolidate their split deployment onto a single host (either CPU-only or GPU-enabled) by running the appropriate profile's deployment steps and migrating PostgreSQL data via `pg_dump` / `pg_restore`.
+
+**Out of Scope**
+- Automated migration tooling to move from split-system to single-system deployment
+- Removing the Case and Quorra reference environment from documentation entirely (they remain as named reference examples)
+- Changing any application code — this story is documentation and story metadata only
+
+**Open Questions**
+- Should `docs/infrastructure.md` be archived (renamed to `docs/infrastructure-deprecated.md`) or updated in place with the deprecation notice? (Product Owner recommendation: update in place with a prominent notice — archived files get ignored and linked references break.)
+- Is a formal ADR (Architecture Decision Record) required to document the retirement of the split-system profile? (Recommended yes — DevOps or Architect to author ADR-014.)
+
+**Size:** S
+**Priority:** P0 (must-have)
+**Sprint:** MVP
+
+---
+
 ## Future Sprint Stories (Out of MVP Scope)
 
 The following story titles are placeholders for future sprints. They are listed here to capture intent and ensure they do not creep into the MVP.
 
 | Story ID | Title | Reason Deferred |
 |----------|-------|-----------------|
-| STORY-022 | Preview HypeReel before download | Requires low-latency streaming or re-render; significant infra complexity |
-| STORY-023 | Multi-person selection in a single reel | ML complexity; requires weighted moment selection across persons |
-| STORY-024 | Manual person annotation and named profiles | Requires persistent storage and face recognition across sessions |
-| STORY-025 | Spotify integration for song selection | Third-party OAuth + streaming licensing considerations |
-| STORY-026 | User authentication and persistent project storage | Full auth system; changes fundamental no-account architecture |
-| STORY-027 | Mobile application (iOS / Android) | Separate platform engineering effort |
-| STORY-028 | Custom transition effects library | Visual design + rendering pipeline extension |
-| STORY-029 | Direct social platform export (Instagram, TikTok) | Third-party API integrations; platform policy compliance |
-| STORY-030 | Resumable / chunked video uploads | Infra and client-side complexity; revisit when large file support is needed |
+| STORY-031 | Preview HypeReel before download | Requires low-latency streaming or re-render; significant infra complexity |
+| STORY-032 | Multi-person selection in a single reel | ML complexity; requires weighted moment selection across persons |
+| STORY-033 | Manual person annotation and named profiles | Requires persistent storage and face recognition across sessions |
+| STORY-034 | Spotify integration for song selection | Third-party OAuth + streaming licensing considerations |
+| STORY-035 | User authentication and persistent project storage | Full auth system; changes fundamental no-account architecture |
+| STORY-036 | Mobile application (iOS / Android) | Separate platform engineering effort |
+| STORY-037 | Custom transition effects library | Visual design + rendering pipeline extension |
+| STORY-038 | Direct social platform export (Instagram, TikTok) | Third-party API integrations; platform policy compliance |
+| STORY-039 | Resumable / chunked video uploads | Infra and client-side complexity; revisit when large file support is needed |
 
 ---
 
