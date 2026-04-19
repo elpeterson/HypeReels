@@ -30,9 +30,12 @@ Why InsightFace CPU-only (not GPU)?
   while detection runs. The GTX 1080 Ti remains dedicated to Frigate and
   FileFlows. See ADR-013 in docs/architecture.md.
 
-InsightFace initialisation (CPU-only):
-  app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+InsightFace initialisation (env-var-driven providers):
+  app = FaceAnalysis(name='buffalo_l', providers=_get_insight_providers())
   app.prepare(ctx_id=-1, det_size=(640, 640))  # ctx_id=-1 = CPU
+
+  Set INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
+  in the GPU deployment profile to enable GPU inference.
 """
 
 from __future__ import annotations
@@ -84,19 +87,37 @@ MIN_FACE_CONFIDENCE = 0.5
 _insight_app: FaceAnalysis | None = None
 
 
+def _get_insight_providers() -> list[str]:
+    """Return the ONNX execution providers list from the environment.
+
+    Reads INSIGHTFACE_PROVIDERS (comma-separated).  Defaults to
+    'CPUExecutionProvider' (safe for GPU-contended hosts, per ADR-013).
+
+    GPU profile sets:
+        INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
+    """
+    raw = os.environ.get("INSIGHTFACE_PROVIDERS", "CPUExecutionProvider")
+    providers = [p.strip() for p in raw.split(",") if p.strip()]
+    if not providers:
+        providers = ["CPUExecutionProvider"]
+    return providers
+
+
 def _get_insight_app() -> FaceAnalysis:
-    """Lazily initialise InsightFace in CPU-only mode (singleton per process)."""
+    """Lazily initialise InsightFace with env-var-driven providers (singleton per process)."""
     global _insight_app
     if _insight_app is None:
-        log.info("insightface_init_start", model="buffalo_l", provider="CPUExecutionProvider")
-        # CPU-only — do NOT use CUDAExecutionProvider (GPU contention, ADR-013)
+        providers = _get_insight_providers()
+        log.info("insightface_init_start", model="buffalo_l", providers=providers)
         _insight_app = FaceAnalysis(
             name="buffalo_l",
-            providers=["CPUExecutionProvider"],
+            providers=providers,
         )
-        # ctx_id=-1 means CPU; ctx_id=0 would mean GPU 0 — must stay -1
+        # ctx_id=-1 selects CPU; ctx_id=0 would select GPU 0.
+        # When CUDAExecutionProvider is listed, InsightFace uses the GPU
+        # automatically; ctx_id=-1 is kept as the safe default.
         _insight_app.prepare(ctx_id=-1, det_size=(640, 640))
-        log.info("insightface_init_complete", model="buffalo_l")
+        log.info("insightface_init_complete", model="buffalo_l", providers=providers)
     return _insight_app
 
 
@@ -528,6 +549,9 @@ def detect_persons(
 
     if session_embeddings is None:
         session_embeddings = []
+
+    # Ensure tmp directory exists (may not be present if worker runs standalone)
+    Path("/tmp/hypereels").mkdir(parents=True, exist_ok=True)
 
     # Download clip
     if clip_url.startswith("file://"):
