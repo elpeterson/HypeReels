@@ -352,7 +352,9 @@ paths:
         "400": { $ref: '#/components/responses/BadRequest' }
         "401": { $ref: '#/components/responses/Unauthorized' }
         "409":
-          description: Session is locked for generation
+          description: |
+            Session is locked (code: SESSION_LOCKED), OR
+            duplicate clip filename (code: DUPLICATE_CLIP, details.existing_clip_id=uuid)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -695,6 +697,10 @@ paths:
         Pre-conditions:
           - At least one clip with status = 'valid'
           - An audio track with analysis_status = 'complete'
+          - All valid clips must have detection_status IN ('complete', 'failed')
+            — if any clip is still pending/processing detection, returns 409
+            with error.code = 'DETECTION_PENDING' and
+            error.details.pending_clips = [...clip_ids]
 
         Subscribe to `GET /sessions/:id/events` to receive `generation-complete`.
       parameters:
@@ -713,17 +719,14 @@ paths:
         "401": { $ref: '#/components/responses/Unauthorized' }
         "404": { $ref: '#/components/responses/NotFound' }
         "409":
-          description: A generation job is already active
+          description: |
+            A generation job is already active (code: GENERATION_IN_PROGRESS), OR
+            person detection is still pending (code: DETECTION_PENDING, details.pending_clips=[...])
           content:
             application/json:
-              schema:
-                allOf:
-                  - { $ref: '#/components/schemas/ErrorEnvelope' }
-                  - type: object
-                    properties:
-                      job_id: { type: string, format: uuid }
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
         "422":
-          description: Precondition not met
+          description: Precondition not met (no valid clips, no audio, audio analysis pending)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
@@ -771,6 +774,28 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorEnvelope' }
 
+  # ── Generation job alias ─────────────────────────────────────────────────────
+  # GET /sessions/{id}/job/{job_id} is an alias for GET /sessions/{id}/generate/{job_id}.
+  # Both paths are implemented. Use whichever is more convenient.
+  /sessions/{id}/job/{job_id}:
+    get:
+      operationId: getGenerationJobAlias
+      summary: Poll generation job status (alias path)
+      tags: [Generation]
+      security: [{ SessionToken: [] }]
+      description: Alias for `GET /sessions/{id}/generate/{job_id}`. Identical response.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: job_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/GenerationJob' }
+        "401": { $ref: '#/components/responses/Unauthorized' }
+        "404": { $ref: '#/components/responses/NotFound' }
+
   # ── Download ─────────────────────────────────────────────────────────────────
   /sessions/{id}/reel:
     get:
@@ -784,11 +809,19 @@ paths:
         `generation_jobs.output_url`. The URL is valid for 2 hours from the
         time generation completed.
 
-        Frontend should call `POST /sessions/:id/download-initiated` immediately
-        so cleanup is scheduled.
+        **Ephemeral lifecycle**: on a successful response (302 or 200), the server
+        automatically enqueues a cleanup job with a 5-minute grace period so that
+        all session assets are permanently deleted after the download window.
+        The cleanup is fire-and-forget — it does NOT block the response.
 
-        If `Accept: application/json` is sent, the server returns 200 with a JSON
-        body containing `download_url` and `expires_at` instead of redirecting.
+        The explicit `POST /sessions/:id/download-initiated` and
+        `POST /sessions/:id/done` routes also trigger cleanup and remain available
+        for clients that want explicit control.
+
+        **Content negotiation**:
+        - Default / `Accept: text/html` / `Accept: */*`: HTTP 302 redirect
+        - `Accept: application/json` (without `text/html`): HTTP 200 with
+          `{ download_url, expires_at }` JSON body
       parameters:
         - name: id
           in: path
@@ -936,6 +969,11 @@ HTTP 302 to the presigned MinIO URL stored in `generation_jobs.output_url`.
 The `assemblyWorker` generates a fresh presigned URL (2 h TTL) at completion time and
 persists it to `generation_jobs.output_url`, so the redirect is ready immediately after
 the `generation-complete` SSE event arrives.
+
+**Cleanup side effect**: calling `GET /sessions/:id/reel` successfully also enqueues a
+5-minute cleanup job for the session. This means the frontend does not need to call
+`POST /sessions/:id/download-initiated` separately (though that route still works for
+explicit control). `POST /sessions/:id/done` triggers immediate cleanup.
 
 If you need a guaranteed fresh URL (user waited > 2 hours): read `output_url` from
 `GET /sessions/:id/generate/:job_id`. A dedicated "re-sign URL" endpoint is out of

@@ -1,25 +1,31 @@
 /**
  * Download & cleanup routes:
- *   POST /sessions/:id/download-initiated
- *   POST /sessions/:id/done
- *   GET  /sessions/:id/reel  (redirect to signed URL)
+ *   GET  /sessions/:id/reel                (redirect or JSON — triggers cleanup)
+ *   POST /sessions/:id/download-initiated  (explicit 5-minute grace period cleanup)
+ *   POST /sessions/:id/done               (immediate cleanup)
  */
 import type { FastifyPluginAsync } from 'fastify';
 import { query } from '../db/client.js';
 import { enqueueCleanup } from '../jobs/producers.js';
 
-// 5 minutes in milliseconds
-const DOWNLOAD_GRACE_MS = 5 * 60 * 1000;
+// Grace period before storage deletion after reel is served
+const DOWNLOAD_GRACE_MS = 5 * 60 * 1000; // 5 minutes
 
 const downloadRoutes: FastifyPluginAsync = async (fastify) => {
   // ── GET /sessions/:id/reel ────────────────────────────────
+  // Ephemeral lifecycle: on successful serve → enqueue cleanup with grace period.
+  // NEVER deletes assets before the reel has been successfully served.
+  //
+  // Content negotiation:
+  //   Accept: text/html or */* (browser) → HTTP 302 redirect to presigned URL
+  //   Accept: application/json           → HTTP 200 with { download_url, expires_at }
   fastify.get<{ Params: { id: string } }>(
     '/sessions/:id/reel',
     async (request, reply) => {
       const { session } = request;
 
-      const jobRes = await query<{ output_url: string | null; status: string }>(
-        `SELECT status, output_url FROM generation_jobs
+      const jobRes = await query<{ output_url: string | null; status: string; completed_at: Date | null }>(
+        `SELECT status, output_url, completed_at FROM generation_jobs
          WHERE session_id = $1 AND status = 'complete'
          ORDER BY created_at DESC LIMIT 1`,
         [session.id],
@@ -34,7 +40,7 @@ const downloadRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      const { output_url } = jobRes.rows[0]!;
+      const { output_url, completed_at } = jobRes.rows[0]!;
       if (!output_url) {
         return reply.code(404).send({
           error: {
@@ -44,7 +50,28 @@ const downloadRoutes: FastifyPluginAsync = async (fastify) => {
         });
       }
 
-      // Redirect to the pre-signed R2 URL directly — no proxying through API
+      // Ephemeral lifecycle: schedule cleanup with grace period now that the
+      // reel URL has been successfully served. This is a fire-and-forget enqueue
+      // — failure to enqueue is logged but does NOT prevent the download.
+      enqueueCleanup(session.id, 'download-initiated', DOWNLOAD_GRACE_MS).catch(
+        (err) => request.log.error({ err, session_id: session.id }, 'Failed to enqueue post-reel cleanup'),
+      );
+
+      // Content negotiation: JSON clients get a structured response,
+      // browser clients get a 302 redirect.
+      const acceptHeader = request.headers.accept ?? '';
+      if (acceptHeader.includes('application/json') && !acceptHeader.includes('text/html')) {
+        // Approximate expiry: completed_at + 2 hours (DOWNLOAD_URL_TTL_SECONDS in assemblyWorker)
+        const expiresAt = completed_at
+          ? new Date(completed_at.getTime() + 2 * 60 * 60 * 1000).toISOString()
+          : null;
+        return reply.code(200).send({
+          download_url: output_url,
+          expires_at: expiresAt,
+        });
+      }
+
+      // Default: redirect to the pre-signed MinIO URL
       return reply.redirect(302, output_url);
     },
   );

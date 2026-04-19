@@ -59,13 +59,23 @@ const highlightsRoutes: FastifyPluginAsync = async (fastify) => {
 
       const body = PutHighlightsBody.parse(request.body);
 
-      // Validate each highlight range
+      // Validate each highlight range individually
       for (const h of body.highlights) {
+        if (h.end_ms <= h.start_ms) {
+          return reply.code(422).send({
+            error: {
+              code: 'HIGHLIGHT_INVALID_RANGE',
+              message: `Highlight end_ms (${h.end_ms}) must be greater than start_ms (${h.start_ms}).`,
+              details: { start_ms: h.start_ms, end_ms: h.end_ms },
+            },
+          });
+        }
         if (h.end_ms - h.start_ms < 1000) {
           return reply.code(422).send({
             error: {
               code: 'HIGHLIGHT_TOO_SHORT',
               message: `Highlight from ${h.start_ms}ms to ${h.end_ms}ms is too short (minimum 1 second).`,
+              details: { start_ms: h.start_ms, end_ms: h.end_ms },
             },
           });
         }
@@ -74,8 +84,30 @@ const highlightsRoutes: FastifyPluginAsync = async (fastify) => {
             error: {
               code: 'HIGHLIGHT_OUT_OF_RANGE',
               message: `Highlight end_ms (${h.end_ms}) exceeds clip duration (${clip.duration_ms}ms).`,
+              details: { start_ms: h.start_ms, end_ms: h.end_ms, clip_duration_ms: clip.duration_ms },
             },
           });
+        }
+      }
+
+      // Detect overlapping ranges (sort by start_ms, check consecutive pairs)
+      if (body.highlights.length > 1) {
+        const sorted = [...body.highlights].sort((a, b) => a.start_ms - b.start_ms);
+        for (let i = 0; i < sorted.length - 1; i++) {
+          const current = sorted[i]!;
+          const next = sorted[i + 1]!;
+          if (next.start_ms < current.end_ms) {
+            return reply.code(422).send({
+              error: {
+                code: 'HIGHLIGHT_OVERLAP',
+                message: `Highlights overlap: [${current.start_ms}ms–${current.end_ms}ms] and [${next.start_ms}ms–${next.end_ms}ms].`,
+                details: {
+                  range_a: { start_ms: current.start_ms, end_ms: current.end_ms },
+                  range_b: { start_ms: next.start_ms, end_ms: next.end_ms },
+                },
+              },
+            });
+          }
         }
       }
 
