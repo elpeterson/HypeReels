@@ -1,0 +1,185 @@
+# HypeReels — Profile 1: CPU-Only (Docker Compose path)
+#
+# All services on a single machine. No GPU required.
+# InsightFace: CPUExecutionProvider only.
+# FFmpeg: software encoding (x264/libx264). FFMPEG_HWACCEL is not set.
+#
+# Reference implementation: Case (Proxmox, CPU-only)
+# See: docs/deployment/profile-1-cpu.md — Path A
+#
+# Usage:
+#   cp .env.example .env   # fill in real values (no placeholders!)
+#   docker compose -f docker/docker-compose.cpu.yml build
+#   docker compose -f docker/docker-compose.cpu.yml up -d
+#
+# First boot — apply migrations:
+#   for f in server/src/db/migrations/*.sql; do
+#     docker exec hypereels-postgres psql -U hypereels -d hypereels < "$f"
+#   done
+#
+# Create MinIO bucket + lifecycle rule:
+#   source .env.minio
+#   docker exec hypereels-minio mc alias set local http://localhost:9000 \
+#     "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+#   docker exec hypereels-minio mc mb --ignore-existing local/hypereels
+#   docker exec hypereels-minio mc ilm rule add local/hypereels \
+#     --expire-days 2 --tags "session_ttl=true"
+
+services:
+
+  # ── API + SPA ────────────────────────────────────────────────────────────────
+  api:
+    image: hypereels-api:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+      target: prod
+    container_name: hypereels-api
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      - ../.env
+    volumes:
+      - ../server/client-dist:/app/client-dist:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - hypereels
+
+  # ── Python workers (CPU-only) ─────────────────────────────────────────────────
+  worker:
+    image: hypereels-worker:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.workers
+    container_name: hypereels-worker
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      - PORT=8000
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      # CPU-only — no FFMPEG_HWACCEL set; no GPU sections in this file
+      - INSIGHTFACE_PROVIDERS=CPUExecutionProvider
+    volumes:
+      - /tmp/hypereels:/tmp/hypereels
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    networks:
+      - hypereels
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: hypereels-postgres
+    restart: unless-stopped
+    env_file:
+      - ../.env.postgres
+    volumes:
+      - hypereels-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hypereels -d hypereels"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hypereels
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: hypereels-redis
+    restart: unless-stopped
+    command: >
+      sh -c "redis-server
+      --requirepass $${REDIS_PASSWORD:-}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru"
+    env_file:
+      - ../.env.redis
+    volumes:
+      - hypereels-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hypereels
+
+  # ── MinIO ─────────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: hypereels-minio
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    env_file:
+      - ../.env.minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - hypereels-minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hypereels
+
+  # ── Prometheus ────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: hypereels-prometheus
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../docker/prometheus-prod.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+    networks:
+      - hypereels
+
+networks:
+  hypereels:
+    driver: bridge
+
+volumes:
+  hypereels-postgres-data:
+  hypereels-redis-data:
+  hypereels-minio-data:
+  prometheus-data:

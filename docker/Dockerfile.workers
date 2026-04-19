@@ -1,0 +1,52 @@
+# HypeReels Python Workers — Dockerfile
+#
+# Installs: InsightFace (CPU-only by default), librosa, FFmpeg, FastAPI/uvicorn.
+# GPU note: The NVIDIA Container Runtime provides GPU access at runtime via
+#   'deploy.resources.reservations.devices' in docker-compose.gpu.yml.
+#   This image itself is CPU-compatible; InsightFace automatically detects
+#   whether CUDA is available and falls back gracefully to CPUExecutionProvider.
+#
+# Build context must be the REPO ROOT.
+# docker buildx build -f docker/Dockerfile.workers -t hypereels-worker:sha .
+
+FROM python:3.12-slim-bookworm
+
+# ── System dependencies ───────────────────────────────────────────────────────
+# FFmpeg 6 is available in Debian Bookworm (or backports).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# ── Python dependencies ───────────────────────────────────────────────────────
+# Upgrade pip first to avoid hash-resolution issues with newer packages.
+COPY workers/requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+# ── InsightFace (CPU-only wheel) ──────────────────────────────────────────────
+# insightface is not in requirements.txt because GPU vs CPU wheels differ.
+# Here we install the CPU-only onnxruntime wheel. When the container runs with
+# GPU passthrough (Profile 2), onnxruntime-gpu can be substituted at build time
+# by passing --build-arg ONNXRUNTIME_PKG=onnxruntime-gpu.
+ARG ONNXRUNTIME_PKG=onnxruntime
+RUN pip install --no-cache-dir insightface ${ONNXRUNTIME_PKG}
+
+# ── Application code ──────────────────────────────────────────────────────────
+COPY workers/ .
+
+# Scratch workspace for downloaded/processed files
+RUN mkdir -p /tmp/hypereels
+
+# ── Runtime ───────────────────────────────────────────────────────────────────
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
