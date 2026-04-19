@@ -1,13 +1,21 @@
 # HypeReels Infrastructure
 
-> **⚠️ Internal Deployment Guide — Profile 3 (Production)**
+> ⚠️ **DEPRECATED (2026-04-19):** This document describes the retired split-system Profile 3 deployment (Case + Quorra simultaneously). Profile 3 has been superseded by two single-system profiles. See:
+> - CPU-only: `docs/deployment/profile-1-cpu.md`
+> - GPU-enabled: `docs/deployment/profile-2-gpu.md`
+>
+> This file is retained for historical reference only. Do not follow these instructions.
+
+---
+
+> **⚠️ Internal Deployment Guide — Profile 3 (Production) — RETIRED**
 > This document is specific to the owner's split-host production deployment.
 > For generic self-hosted guides, see [docs/deployment/README.md](./deployment/README.md).
 > Operator-specific details (real IPs, domain, credentials) should be stored privately
 > and not committed to public repositories.
 
 > Owner: DevOps Engineer
-> Last updated: 2026-04-08
+> Last updated: 2026-04-08 (deprecated 2026-04-19)
 > Proxmox version: 9.1.5 | Unraid version: 7.2.2
 
 ---

@@ -7,7 +7,7 @@
 
 ## System Overview
 
-HypeReels is a stateless, session-scoped web application that accepts user-uploaded video clips and an audio track, runs an async AI pipeline to detect people (via InsightFace CPU-only to avoid GPU contention with Frigate), analyse the beat structure of the song, and assemble a beat-synced highlight reel, then delivers a single downloadable MP4 and immediately destroys all uploaded and generated assets. There are no user accounts; a UUID session token ties a browser session to all associated server-side state. The entire stack runs on two on-premises servers — Case (Proxmox, 192.168.1.122) and Quorra (Unraid, 192.168.1.100) — connected over a 192.168.1.0/24 LAN, exposed externally via an existing Cloudflare Zero Trust tunnel on Quorra, with no dependency on any managed cloud service.
+HypeReels is a stateless, session-scoped web application that accepts user-uploaded video clips and an audio track, runs an async AI pipeline to detect people (via InsightFace), analyse the beat structure of the song, and assemble a beat-synced highlight reel, then delivers a single downloadable MP4 and immediately destroys all uploaded and generated assets. There are no user accounts; a UUID session token ties a browser session to all associated server-side state. The entire stack runs on a **single self-hosted machine** under one of two deployment profiles: CPU-only (Profile 1) or GPU-enabled with CPU fallback (Profile 2). All services — API, PostgreSQL, Redis, MinIO, and Python workers — are co-located on that single machine. The reference implementations use Case (Proxmox, CPU-only) and Quorra (Unraid, NVIDIA GPU), but the documented deployment guides are generic for any self-hoster. There is no dependency on any managed cloud service. (The former two-machine split-system deployment is retired; see ADR-019.)
 
 ---
 
@@ -1125,13 +1125,29 @@ Do NOT spin up new Grafana, Prometheus, or InfluxDB instances. All HypeReels obs
 
 ### ADR-018: Database Placement Per Deployment Profile
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-019 — see ADR-019 for the updated decision under single-system profiles.
 - **Context:** Profile 3 (Production) has PostgreSQL running in a Docker container on Quorra (port 7432). Profile 1 (single Proxmox host, no Quorra) has no Quorra to target. Profile 2 (Unraid-only Docker Compose) needs a local DB. Each profile needs a clear, operable `DATABASE_URL`.
-- **Decision:** Profile 1 (Proxmox LXC only): Install PostgreSQL natively via `apt` inside the API LXC (CT 113). Connection is loopback (`localhost:5432`), eliminating network latency and the Quorra dependency for a single-host deployment. Profile 2 (Docker Compose on Unraid): PostgreSQL as a `postgres:18` Docker Compose service on the same stack; `DATABASE_URL` uses the Docker service name. Profile 3 (Production — Case + Quorra): Docker container on Quorra at `192.168.1.100:7432` (unchanged).
+- **Decision (original):** Profile 1 (Proxmox LXC only): Install PostgreSQL natively via `apt` inside the API LXC (CT 113). Connection is loopback (`localhost:5432`), eliminating network latency and the Quorra dependency for a single-host deployment. Profile 2 (Docker Compose on Unraid): PostgreSQL as a `postgres:18` Docker Compose service on the same stack; `DATABASE_URL` uses the Docker service name. Profile 3 (Production — Case + Quorra): Docker container on Quorra at `192.168.1.100:7432` (unchanged).
 - **Consequences:** `DATABASE_URL` differs per profile but all profiles use the same `.env` template (`.env.example`). Profile 1 requires `pg_createcluster` / `createuser` / `createdb` steps during initial provisioning. Profile 3 retains the existing Quorra container. The `waitForDatabase()` backoff (ADR-016 companion change, Fix 1 in the backend PR) handles transient connectivity failures at startup across all profiles.
+
+---
+
+### ADR-019: Retire Split-System Profile 3; Establish Two Single-System Deployment Profiles
+
+- **Status:** Accepted (supersedes ADR-018 on DB placement; supersedes Profile 3 described in `docs/infrastructure.md`)
+- **Context:** The original deployment model split services across two machines: Case (Proxmox, API + Redis + MinIO) and Quorra (Unraid, PostgreSQL + Python workers). This required cross-host networking, made new self-hosters dependent on understanding a two-machine topology, and prevented a standalone single-machine deployment. STORY-022 through STORY-026 establish a requirement for exactly two single-system profiles accessible to generic self-hosters.
+- **Decision:** Profile 3 (split-system Case + Quorra simultaneously) is **retired** effective 2026-04-19. The canonical deployment models are:
+  1. **Profile 1 — CPU-Only:** All services (API, PostgreSQL, Redis, MinIO, Python workers) on a single machine. Two sub-paths: Proxmox LXC (three containers) or Docker Compose (single `docker-compose.yml`). InsightFace runs `CPUExecutionProvider` exclusively. PostgreSQL is LOCAL to the machine (LXC or Docker container) — it does NOT run on a remote host.
+  2. **Profile 2 — GPU-Enabled:** All services on a single machine as Docker containers. The NVIDIA Container Runtime passes GPU access to the worker container. InsightFace uses `CUDAExecutionProvider` when a GPU is present, falls back to `CPUExecutionProvider` automatically when it is not. FFmpeg uses NVENC when `FFMPEG_HWACCEL=nvenc` is set, otherwise x264. The GPU is fully optional. PostgreSQL is LOCAL (Docker container on the same machine).
+  - Case and Quorra are retained as named **reference implementations** only: Case exemplifies Profile 1 (Proxmox, CPU-only); Quorra exemplifies Profile 2 (Unraid, NVIDIA GPU). No deployment instructions reference their specific IPs as required infrastructure.
+- **Consequences:**
+  - All deployment documentation is rewritten to use `<HOST_IP>` and `<PLACEHOLDER>` variables. Case and Quorra IPs appear only in clearly-labelled reference callout boxes.
+  - `docs/infrastructure.md` is marked deprecated (Profile 3 reference retained for history only).
+  - ADR-005 (PostgreSQL on Quorra Docker) and ADR-008 (Python workers on Quorra) are superseded for new deployments — both services now run on the same single machine as the API.
+  - The two-machine network topology diagram and Service-to-Host Allocation tables in this document remain for historical record of the Case+Quorra reference environment. New self-hosters should refer to `docs/deployment/profile-1-cpu.md` and `docs/deployment/profile-2-gpu.md`.
 
 ---
 
 > **Status (as of 2026-04-19):** All MVP implementation complete. All 5 PRs merged to main, all 8 GitHub issues closed.
 > Frontend (React SPA), backend (Fastify API + BullMQ workers), and Python workers (librosa, InsightFace, FFmpeg) are fully implemented.
-> Deployment docs: `docs/infrastructure.md` (Production/Profile 3), `docs/deployment/profile-1-cpu.md`, `docs/deployment/profile-2-gpu.md`.
+> Deployment: two single-system profiles — `docs/deployment/profile-1-cpu.md` (CPU-only) and `docs/deployment/profile-2-gpu.md` (GPU-enabled). The former split-system Profile 3 is retired; see `docs/infrastructure.md` (deprecated) for historical reference.

@@ -1,10 +1,373 @@
-# Profile 1 — CPU Self-Hosted (Proxmox)
+# Profile 1 — CPU-Only (Single Machine)
 
-> **Deployment overview:** Three LXC containers on a single Proxmox host. No GPU required. InsightFace runs CPU-only. PostgreSQL and Redis run natively (apt) inside CT 200 alongside the API. Python workers run as a combined Docker container in a privileged LXC (CT 201). MinIO runs in CT 202 with a ZFS bind mount.
+> **Deployment overview:** All HypeReels services run on a single machine — no GPU required. PostgreSQL, Redis, MinIO, the Fastify API, and all Python workers are co-located. Two paths are available: Proxmox LXC (three containers) or Docker Compose (all-in-one). InsightFace runs CPU-only.
 
 ---
 
-## Service Layout
+> ### Reference Implementation
+>
+> **Case** (Proxmox host, CPU-only): Dual Xeon X5650, 144 GB RAM, ZFS storage.
+> The instructions below are written generically for any self-hoster. Case-specific IPs and pool names appear only here.
+>
+> | Service | CT ID | IP | Storage pool |
+> |---------|-------|----|--------------|
+> | API + PostgreSQL + Redis | CT 113 | 192.168.1.136 | vm_storage |
+> | MinIO | CT 115 | 192.168.1.138 | storage_1tb (899 GB ZFS) |
+>
+> Replace all `<PLACEHOLDER>` values with your own network addresses and pool names when following the guide below.
+
+---
+
+## Hardware Prerequisites
+
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| CPU | 4 cores / 8 threads at 2.0 GHz | 8+ cores |
+| RAM | 8 GB | 16 GB |
+| Storage — OS + services | 30 GB | 50 GB SSD |
+| Storage — data volume (MinIO) | 200 GB | 500 GB+ (ZFS pool or dedicated volume) |
+| Network | Static IP or DHCP reservation | Gigabit LAN |
+| GPU | None required | — |
+
+**Required software (choose one path):**
+- **Proxmox path:** Proxmox VE 8.x or 9.x
+- **Docker Compose path:** Docker Engine 24+ with Docker Compose v2 (any Linux distro)
+
+---
+
+## Path A: Docker Compose (Recommended for Most Self-Hosters)
+
+This is the easiest deployment path. A single `docker-compose.yml` starts all services. Works on any Linux machine with Docker installed — no Proxmox required.
+
+### A1. Install Docker Engine
+
+```bash
+# Install Docker Engine (Debian/Ubuntu)
+apt-get update
+apt-get install -y ca-certificates curl gnupg lsb-release
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg \
+  | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/debian \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  | tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+systemctl enable docker
+systemctl start docker
+docker run --rm hello-world
+```
+
+### A2. Clone the Repo
+
+```bash
+mkdir -p /opt/hypereels
+git clone https://github.com/<ORG>/hypereels.git /opt/hypereels/app
+cd /opt/hypereels/app
+```
+
+### A3. Configure Environment Files
+
+```bash
+# Main .env — API and shared config
+cat > /opt/hypereels/app/.env << 'EOF'
+# ── Database (Docker service name) ────────────────────────────────────────────
+DATABASE_URL=postgresql://hypereels:<POSTGRES_PASSWORD>@hypereels-postgres:5432/hypereels
+DATABASE_SSL=false
+
+# ── Redis (Docker service name) ───────────────────────────────────────────────
+REDIS_URL=redis://:<REDIS_PASSWORD>@hypereels-redis:6379
+REDIS_PASSWORD=<REDIS_PASSWORD>
+
+# ── MinIO ─────────────────────────────────────────────────────────────────────
+# Internal (service-to-service) endpoint uses Docker service name
+MINIO_ENDPOINT=http://hypereels-minio:9000
+MINIO_ACCESS_KEY_ID=<MINIO_SERVICE_ACCOUNT_KEY>
+MINIO_SECRET_ACCESS_KEY=<MINIO_SERVICE_ACCOUNT_SECRET>
+MINIO_BUCKET=hypereels
+# Public URL must use the HOST IP — presigned URLs are resolved by the browser,
+# which is outside the Docker network. Replace <HOST_IP> with your machine's LAN IP.
+MINIO_PUBLIC_URL=http://<HOST_IP>:9000/hypereels
+
+# Legacy R2_* aliases — mirrors MINIO_* above
+R2_ENDPOINT=http://hypereels-minio:9000
+R2_ACCESS_KEY_ID=<MINIO_SERVICE_ACCOUNT_KEY>
+R2_SECRET_ACCESS_KEY=<MINIO_SERVICE_ACCOUNT_SECRET>
+R2_BUCKET=hypereels
+R2_ACCOUNT_ID=local
+R2_PUBLIC_URL=http://<HOST_IP>:9000/hypereels
+
+# ── API server ────────────────────────────────────────────────────────────────
+PORT=3001
+HOST=0.0.0.0
+NODE_ENV=production
+LOG_LEVEL=info
+CORS_ORIGIN=https://<YOUR_DOMAIN>
+
+# ── Python workers ────────────────────────────────────────────────────────────
+PYTHON_WORKER_URL=http://hypereels-worker:8000
+PYTHON_TIMEOUT_MS=300000
+PYTHON_WORKER_AUDIO_TIMEOUT_MS=300000
+PYTHON_WORKER_ASSEMBLY_TIMEOUT_MS=900000
+
+# ── InsightFace (CPU-only) ────────────────────────────────────────────────────
+INSIGHTFACE_MODEL=buffalo_l
+INSIGHTFACE_PROVIDERS=CPUExecutionProvider
+INSIGHTFACE_COSINE_THRESHOLD=0.45
+
+# ── FFmpeg (software encoding) ────────────────────────────────────────────────
+FFMPEG_CRF=20
+FFMPEG_PRESET=fast
+FFMPEG_MAX_WIDTH=1920
+# FFMPEG_HWACCEL is not set — software (x264) encoding is the default
+
+# ── Session & upload limits ───────────────────────────────────────────────────
+SESSION_TTL_HOURS=24
+CLEANUP_GRACE_PERIOD_MINUTES=5
+MAX_CLIPS_PER_SESSION=10
+MAX_CLIP_DURATION_MS=300000
+MAX_CLIP_SIZE_BYTES=500000000
+MAX_AUDIO_DURATION_MS=600000
+GENERATION_TIMEOUT_MS=900000
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+METRICS_PATH=/metrics
+EOF
+chmod 600 /opt/hypereels/app/.env
+
+# PostgreSQL container env
+cat > /opt/hypereels/app/.env.postgres << 'EOF'
+POSTGRES_DB=hypereels
+POSTGRES_USER=hypereels
+POSTGRES_PASSWORD=<POSTGRES_PASSWORD>
+EOF
+chmod 600 /opt/hypereels/app/.env.postgres
+
+# Redis container env
+cat > /opt/hypereels/app/.env.redis << 'EOF'
+REDIS_PASSWORD=<REDIS_PASSWORD>
+EOF
+chmod 600 /opt/hypereels/app/.env.redis
+
+# MinIO container env
+cat > /opt/hypereels/app/.env.minio << 'EOF'
+MINIO_ROOT_USER=<MINIO_ROOT_USER>
+MINIO_ROOT_PASSWORD=<MINIO_ROOT_PASSWORD>
+EOF
+chmod 600 /opt/hypereels/app/.env.minio
+```
+
+**Generate strong passwords:**
+```bash
+openssl rand -base64 32  # run once per secret
+```
+
+### A4. Build the SPA
+
+```bash
+cd /opt/hypereels/app/client
+npm install
+npm run build
+# Copy output to API's static serving directory
+cp -r dist ../server/client-dist
+```
+
+### A5. docker-compose.yml
+
+Save this as `/opt/hypereels/app/docker-compose.yml` (CPU-only profile — no GPU sections):
+
+```yaml
+services:
+
+  # ── API + SPA ────────────────────────────────────────────────────────────────
+  api:
+    image: hypereels-api:latest
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: hypereels-api
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      - .env
+    volumes:
+      - ./server/client-dist:/app/client-dist:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - hypereels
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:18
+    container_name: hypereels-postgres
+    restart: unless-stopped
+    env_file:
+      - .env.postgres
+    volumes:
+      - hypereels-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hypereels -d hypereels"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hypereels
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: hypereels-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --requirepass ${REDIS_PASSWORD}
+      --appendonly yes
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+    env_file:
+      - .env.redis
+    volumes:
+      - hypereels-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hypereels
+
+  # ── MinIO ─────────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: hypereels-minio
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    env_file:
+      - .env.minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - hypereels-minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hypereels
+
+  # ── Python Worker (CPU-only — no GPU sections) ────────────────────────────────
+  worker:
+    image: hypereels-worker:latest
+    build:
+      context: .
+      dockerfile: workers/Dockerfile
+    container_name: hypereels-worker
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - FFMPEG_PATH=/usr/bin/ffmpeg
+      # CPU-only InsightFace — explicitly set (no GPU required)
+      - INSIGHTFACE_PROVIDERS=CPUExecutionProvider
+    volumes:
+      - /tmp/hypereels:/tmp/hypereels
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - hypereels
+
+networks:
+  hypereels:
+    driver: bridge
+
+volumes:
+  hypereels-postgres-data:
+  hypereels-redis-data:
+  hypereels-minio-data:
+```
+
+### A6. Start Services
+
+```bash
+cd /opt/hypereels/app
+
+# Build images
+docker compose build
+
+# Start all services
+docker compose up -d
+
+# Check status
+docker compose ps
+```
+
+### A7. Run Migrations (First Boot Only)
+
+```bash
+# Wait for PostgreSQL to be healthy, then apply schema migrations
+for f in \
+  server/src/db/migrations/001_initial_schema.sql \
+  server/src/db/migrations/002_rename_r2_key_to_minio_key.sql \
+  server/src/db/migrations/003_add_clip_validation.sql
+do
+  echo "Applying $f ..."
+  docker exec -i hypereels-postgres psql -U hypereels -d hypereels < "$f"
+done
+
+# Verify tables
+docker exec hypereels-postgres psql -U hypereels -d hypereels -c "\dt"
+```
+
+### A8. Create MinIO Bucket and Lifecycle Rule
+
+```bash
+source /opt/hypereels/app/.env.minio
+
+docker exec hypereels-minio mc alias set local http://localhost:9000 \
+  "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"
+docker exec hypereels-minio mc mb --ignore-existing local/hypereels
+docker exec hypereels-minio mc ilm rule add local/hypereels \
+  --expire-days 2 --tags "session_ttl=true"
+docker exec hypereels-minio mc ilm rule ls local/hypereels
+```
+
+### A9. Reverse Proxy
+
+The API listens on port 3001. Point your reverse proxy at `http://<HOST_IP>:3001`.
+
+See [Section 8 in Path B](#8-reverse-proxy) for Nginx Proxy Manager and Caddy examples — they apply equally to the Docker Compose path.
+
+---
+
+## Path B: Proxmox LXC
+
+Three LXC containers on a single Proxmox host. PostgreSQL and Redis run natively (apt) in CT 200 alongside the API, avoiding the Redis systemd sandboxing issue that affects separate unprivileged LXCs. Python workers run as a combined Docker container in a privileged LXC (CT 201). MinIO runs in CT 202.
+
+### Service Layout
 
 | CT ID | Role | RAM | Disk | IP |
 |-------|------|-----|------|----|
@@ -14,7 +377,7 @@
 
 **Key design decisions:**
 - PostgreSQL and Redis in CT 200 avoid an extra LXC and sidestep the Redis systemd sandboxing problem — no unit override needed since Redis runs in the same LXC context as the API.
-- CT 201 is a **privileged** LXC — this is required to run Docker Engine inside an LXC without needing the `nesting=1` workaround.
+- CT 201 is a **privileged** LXC — this is required to run Docker Engine inside an LXC.
 - Process management: systemd `EnvironmentFile` (NOT PM2 — see warning below).
 - SPA is served by `@fastify/static` from `server/client-dist/`.
 
@@ -148,7 +511,7 @@ CREATE DATABASE hypereels OWNER hypereels;
 GRANT ALL PRIVILEGES ON DATABASE hypereels TO hypereels;
 SQL"
 
-# Allow LAN connections (edit pg_hba.conf)
+# Allow connections from worker LXC (edit pg_hba.conf)
 PG_VERSION=$(pg_lscluster | awk 'NR==2{print $1}')
 PG_CONF="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
 echo "host    hypereels    hypereels    <WORKER_LXC_IP>/32    md5" >> "$PG_CONF"
@@ -192,7 +555,6 @@ mkdir -p /opt/hypereels/app
 chown hypereels:hypereels /opt/hypereels/app
 
 # Clone repo (preferred — avoids macOS/Linux binary incompatibility from rsync/scp)
-# git clone is the preferred approach: dependencies are installed natively in the container.
 git clone https://github.com/<ORG>/hypereels.git /opt/hypereels/app
 chown -R hypereels:hypereels /opt/hypereels/app
 
@@ -252,11 +614,12 @@ PYTHON_TIMEOUT_MS=300000
 PYTHON_WORKER_AUDIO_TIMEOUT_MS=300000
 PYTHON_WORKER_ASSEMBLY_TIMEOUT_MS=900000
 
-# ── InsightFace ───────────────────────────────────────────────────────────────
+# ── InsightFace (CPU-only) ────────────────────────────────────────────────────
 INSIGHTFACE_MODEL=buffalo_l
+INSIGHTFACE_PROVIDERS=CPUExecutionProvider
 INSIGHTFACE_COSINE_THRESHOLD=0.45
 
-# ── FFmpeg ────────────────────────────────────────────────────────────────────
+# ── FFmpeg (software encoding) ────────────────────────────────────────────────
 FFMPEG_CRF=20
 FFMPEG_PRESET=fast
 FFMPEG_MAX_WIDTH=1920
@@ -367,11 +730,8 @@ docker run --rm hello-world
 ### Deploy workers
 
 ```bash
-# Copy workers directory (preferred: clone repo)
+# Clone repo
 git clone https://github.com/<ORG>/hypereels.git /opt/hypereels
-
-# Or rsync (excludes node_modules):
-# rsync -av --exclude=node_modules --exclude='.git' workers/ root@<WORKER_LXC_IP>:/opt/hypereels/workers/
 
 # Create env file for workers
 cat > /opt/hypereels/workers/.env << 'EOF'
@@ -387,6 +747,8 @@ R2_PUBLIC_URL=http://<MINIO_LXC_IP>:9000/hypereels
 PYTHON_WORKER_URL=http://<WORKER_LXC_IP>:8000
 PORT=8000
 FFMPEG_PATH=/usr/bin/ffmpeg
+# CPU-only InsightFace — no GPU required
+INSIGHTFACE_PROVIDERS=CPUExecutionProvider
 EOF
 chmod 600 /opt/hypereels/workers/.env
 
@@ -411,7 +773,7 @@ curl http://localhost:8000/health
 > ```bash
 > # On a machine with internet access:
 > pip install insightface
-> python -c "import insightface; app = insightface.app.FaceAnalysis(name='buffalo_l'); app.prepare(ctx_id=0)"
+> python -c "import insightface; app = insightface.app.FaceAnalysis(name='buffalo_l'); app.prepare(ctx_id=-1)"
 > # Copy ~/.insightface/models/buffalo_l/ to CT 201 and add:
 > # -v /path/to/models:/root/.insightface/models
 > ```
@@ -525,7 +887,7 @@ MinIO Console is accessible at `http://<MINIO_LXC_IP>:9001` — log in with `<MI
 All secrets are consolidated in `/opt/hypereels/app/.env` on CT 200. The `.env` template was shown in [Section 3](#3-ct-200-setup--api--postgresql--redis). Replace all `<PLACEHOLDER>` values before starting services.
 
 **Checklist:**
-- [ ] `<POSTGRES_PASSWORD>` — strong random password
+- [ ] `<POSTGRES_PASSWORD>` — strong random password (`openssl rand -base64 32`)
 - [ ] `<REDIS_PASSWORD>` — strong random password
 - [ ] `<MINIO_ROOT_USER>` — MinIO root access key (used for initial setup)
 - [ ] `<MINIO_ROOT_PASSWORD>` — MinIO root secret key
@@ -568,7 +930,9 @@ The API's `@fastify/static` plugin serves `server/client-dist/` at the root path
 
 ## 8. Reverse Proxy
 
-Choose any reverse proxy that can terminate TLS and proxy to `http://<API_LXC_IP>:3001`. Options:
+Choose any reverse proxy that can terminate TLS and proxy to the API port. For Docker Compose deployments, the API is at `http://<HOST_IP>:3001`. For LXC deployments, the API is at `http://<API_LXC_IP>:3001`.
+
+Options:
 - **Nginx Proxy Manager** (recommended for homelab — GUI-based, Let's Encrypt built-in)
 - **Caddy** (automatic HTTPS, minimal config)
 - **Nginx** (full control)
@@ -579,7 +943,7 @@ If using a Cloudflare Zero Trust tunnel for external HTTPS access:
 
 > **⚠️ IMPORTANT — Do this BEFORE requesting the Let's Encrypt certificate:**
 >
-> The Cloudflare tunnel public hostname must be configured BEFORE NPM completes the ACME HTTP-01 challenge. If the hostname isn't in Cloudflare first, Let's Encrypt cannot reach your proxy and certificate issuance will fail.
+> The Cloudflare tunnel public hostname must be configured BEFORE NPM completes the ACME HTTP-01 challenge. If the hostname is not in Cloudflare first, Let's Encrypt cannot reach your proxy and certificate issuance will fail.
 >
 > 1. Go to: https://one.dash.cloudflare.com → Networks → Tunnels
 > 2. Select your tunnel → Configure → Public Hostnames → Add a public hostname
@@ -598,7 +962,7 @@ In NPM (http://`<NPM_IP>`:81), add a Proxy Host:
 
 ```
 Domain Names:        <YOUR_DOMAIN>
-Forward Hostname/IP: <API_LXC_IP>
+Forward Hostname/IP: <API_LXC_IP>   (or <HOST_IP> for Docker Compose path)
 Forward Port:        3001
 Websockets Support:  ON  (required for SSE)
 SSL Tab:             Request new Let's Encrypt certificate
@@ -632,8 +996,11 @@ add_header Strict-Transport-Security "max-age=31536000" always;
 After all services are running:
 
 ```bash
+# Replace <API_IP> with <API_LXC_IP> (Proxmox path) or <HOST_IP> (Docker path)
+# Replace <WORKER_IP> with <WORKER_LXC_IP> (Proxmox path) or <HOST_IP> (Docker path)
+
 # 1. API health (direct LAN)
-curl http://<API_LXC_IP>:3001/health
+curl http://<API_IP>:3001/health
 # {"status":"ok"}
 
 # 2. API health (via reverse proxy + domain)
@@ -641,18 +1008,26 @@ curl https://<YOUR_DOMAIN>/health
 # {"status":"ok"}
 
 # 3. Python workers health
-curl http://<WORKER_LXC_IP>:8000/health
+curl http://<WORKER_IP>:8000/health
 # {"status":"ok","service":"hypereels-python-worker"}
 
-# 4. Redis connectivity
+# 4. Redis connectivity (Proxmox path)
 redis-cli -h <API_LXC_IP> -a '<REDIS_PASSWORD>' ping
 # PONG
 
-# 5. PostgreSQL connectivity
+# 4. Redis connectivity (Docker path)
+docker exec hypereels-redis redis-cli -a '<REDIS_PASSWORD>' ping
+# PONG
+
+# 5. PostgreSQL connectivity (Proxmox path)
 psql -h <API_LXC_IP> -p 5432 -U hypereels -d hypereels -c "SELECT NOW();"
 
+# 5. PostgreSQL connectivity (Docker path)
+docker exec hypereels-postgres pg_isready -U hypereels -d hypereels
+
 # 6. MinIO Console
-# Open http://<MINIO_LXC_IP>:9001 in your browser
+# Open http://<MINIO_LXC_IP>:9001  (Proxmox path)
+# Open http://<HOST_IP>:9001        (Docker path)
 # Log in with MINIO_ROOT_USER / MINIO_ROOT_PASSWORD
 # Confirm the "hypereels" bucket exists
 
@@ -667,7 +1042,7 @@ psql -h <API_LXC_IP> -p 5432 -U hypereels -d hypereels -c "SELECT NOW();"
 
 ### PostgreSQL — nightly pg_dump
 
-Run from CT 200 (PostgreSQL is local):
+**Proxmox path** — run from CT 200 (PostgreSQL is local):
 
 ```bash
 # Cron entry on CT 200 (crontab -e as root)
@@ -679,14 +1054,20 @@ Run from CT 200 (PostgreSQL is local):
   rm -f /tmp/hypereels-postgres-$(date +\%Y\%m\%d).sql.gz
 ```
 
-> Install `mc` on CT 200: `wget -O /usr/local/bin/mc https://dl.min.io/client/mc/release/linux-amd64/mc && chmod +x /usr/local/bin/mc && /usr/local/bin/mc alias set local http://<MINIO_LXC_IP>:9000 <MINIO_ROOT_USER> <MINIO_ROOT_PASSWORD>`
+**Docker Compose path:**
+
+```bash
+# /etc/cron.d/hypereels-backup
+0 2 * * * root docker exec hypereels-postgres pg_dump -U hypereels hypereels | \
+  gzip > /opt/hypereels/backups/postgres-$(date +\%Y\%m\%d).sql.gz
+```
 
 ### Redis — AOF persistence + weekly backup
 
-Redis is configured with `appendonly yes` — data survives Redis restarts. For off-host backup:
+Redis is configured with `appendonly yes` — data survives Redis restarts.
 
 ```bash
-# Cron entry on CT 200 (crontab -e as root) — weekly AOF snapshot
+# Cron entry — weekly AOF snapshot (Proxmox path, CT 200)
 0 3 * * 0 cp /var/lib/redis/appendonly.aof /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof && \
   gzip /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof && \
   /usr/local/bin/mc cp /tmp/hypereels-redis-$(date +\%Y\%m\%d).aof.gz \
@@ -720,7 +1101,7 @@ pct reboot 202
 
 ### Workers cannot reach API / Redis / MinIO
 
-Verify CT 201 can reach CT 200 and CT 202:
+**Proxmox path** — verify CT 201 can reach CT 200 and CT 202:
 
 ```bash
 pct exec 201 -- nc -zv <API_LXC_IP> 3001
@@ -734,8 +1115,16 @@ Check the iptables rules on CT 200 are not blocking worker traffic:
 pct exec 200 -- iptables -L INPUT -n
 ```
 
+**Docker Compose path** — verify containers are on the same network:
+
+```bash
+docker network inspect hypereels_hypereels
+docker exec hypereels-worker curl http://hypereels-minio:9000/minio/health/live
+```
+
 ### MinIO bucket not found
 
+**Proxmox path:**
 ```bash
 # Check the bind mount is active inside CT 202
 pct exec 202 -- df -h /data
@@ -750,6 +1139,28 @@ pct exec 202 -- /usr/local/bin/mc alias set local http://<MINIO_LXC_IP>:9000 <MI
 pct exec 202 -- /usr/local/bin/mc mb --ignore-existing local/hypereels
 ```
 
+**Docker Compose path:**
+```bash
+docker exec hypereels-minio mc mb --ignore-existing local/hypereels
+```
+
 ### InsightFace model download fails
 
-See the note in Section 4. Pre-download the `buffalo_l` model on a machine with internet access and volume-mount it into the worker container.
+On first run, the worker downloads `buffalo_l` (~500 MB) from the InsightFace CDN. If the container has no internet access, pre-download the model on a machine that does:
+
+```bash
+pip install insightface
+python -c "import insightface; app = insightface.app.FaceAnalysis(name='buffalo_l'); app.prepare(ctx_id=-1)"
+# Then volume-mount ~/.insightface/models into the container:
+# -v /path/to/models:/root/.insightface/models
+```
+
+### MinIO presigned URLs not accessible from browser
+
+`MINIO_PUBLIC_URL` (and `R2_PUBLIC_URL`) must use the **host's LAN IP**, not a Docker service name or `localhost`. Presigned URLs are resolved by the browser, which is outside the Docker network.
+
+```bash
+# For Docker Compose path, verify:
+grep MINIO_PUBLIC_URL /opt/hypereels/app/.env
+# Should be: MINIO_PUBLIC_URL=http://<HOST_IP>:9000/hypereels
+```

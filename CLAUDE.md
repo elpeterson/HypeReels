@@ -38,6 +38,22 @@ HypeReels is a web application that automatically generates high-energy "hype re
 
 > Defined by the Architect. See `docs/architecture.md`.
 
+## Deployment Profiles
+
+HypeReels supports exactly **two single-system deployment profiles**. All services run on one machine — there is no supported split-system or multi-host deployment.
+
+| Profile | Description | Reference Implementation |
+|---------|-------------|--------------------------|
+| **Profile 1 — CPU-Only** | All services on one machine, no GPU. Two paths: Proxmox LXC or Docker Compose. InsightFace: `CPUExecutionProvider`. FFmpeg: x264. | Case (Proxmox LXC) |
+| **Profile 2 — GPU-Enabled** | All services as Docker containers on one machine. NVIDIA GPU optional — CPU fallback automatic. InsightFace: CUDA → CPU fallback. FFmpeg: NVENC opt-in via `FFMPEG_HWACCEL=nvenc`. | Quorra (Unraid Docker) |
+
+> **Profile 3 (split-system) is retired.** See `docs/infrastructure.md` for the deprecation notice.
+
+Deployment docs:
+- `docs/deployment/README.md` — profile comparison and hardware requirements
+- `docs/deployment/profile-1-cpu.md` — CPU-only single-machine deployment
+- `docs/deployment/profile-2-gpu.md` — GPU-enabled single-machine deployment
+
 ## Engineering Workflow
 
 Seven specialized agents collaborate in a sequential pipeline. Each agent reads the artifacts produced by previous agents and writes its own.
@@ -62,4 +78,4 @@ Steps 3, 4, and 5 can run in parallel once the architecture is ready.
 | `docs/architecture.md` | Architect | System design, tech stack, data models, component boundaries |
 | `docs/api-spec.md` | Backend Engineer | REST API specification (OpenAPI/Swagger format) |
 | `docs/test-plan.md` | QA Engineer | Test strategy, test cases, coverage targets |
-| `docs/infrastructure.md` | DevOps Engineer | Infrastructure as code, deployment pipeline, monitoring |
+| `docs/infrastructure.md` | DevOps Engineer | **DEPRECATED** — retired Profile 3 (split-system) reference. See `docs/deployment/` for current profiles. |
