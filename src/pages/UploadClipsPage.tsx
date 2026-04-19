@@ -8,18 +8,26 @@ import { ClipCard } from '@/components/ClipCard'
 import { EphemeralWarningBanner } from '@/components/EphemeralWarningBanner'
 import { cn } from '@/lib/utils'
 
-const ACCEPTED_MIME = ['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/webm']
-const ACCEPTED_EXT = ['.mp4', '.mov', '.mkv', '.webm']
-const MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024 // 2 GB
-const MAX_CLIPS = 10
+// Spec-required formats: mp4, mov, avi, webm
+const ACCEPTED_MIME = ['video/mp4', 'video/quicktime', 'video/x-msvideo', 'video/avi', 'video/webm']
+const ACCEPTED_EXT = ['.mp4', '.mov', '.avi', '.webm']
+
+// All limits come from env vars — never hardcoded
+const MAX_FILE_SIZE_BYTES = Number(import.meta.env.VITE_MAX_CLIP_SIZE_BYTES ?? 2 * 1024 * 1024 * 1024)
+const MAX_CLIPS = Number(import.meta.env.VITE_MAX_CLIPS ?? 10)
+
+const MAX_FILE_SIZE_LABEL = (() => {
+  const gb = MAX_FILE_SIZE_BYTES / (1024 * 1024 * 1024)
+  return gb >= 1 ? `${gb} GB` : `${Math.round(MAX_FILE_SIZE_BYTES / (1024 * 1024))} MB`
+})()
 
 function validateFile(file: File): string | null {
-  const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+  const ext = '.' + (file.name.split('.').pop()?.toLowerCase() ?? '')
   if (!ACCEPTED_MIME.includes(file.type) && !ACCEPTED_EXT.includes(ext)) {
-    return 'Unsupported format. Please upload MP4, MOV, MKV, or WebM.'
+    return `Unsupported format "${ext.slice(1).toUpperCase()}". Please upload MP4, MOV, AVI, or WebM.`
   }
   if (file.size > MAX_FILE_SIZE_BYTES) {
-    return 'File too large. Maximum size is 2 GB per clip.'
+    return `File too large. Maximum size is ${MAX_FILE_SIZE_LABEL} per clip.`
   }
   return null
 }
@@ -135,7 +143,7 @@ export function UploadClipsPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Upload Video Clips</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Upload one or more video clips (MP4, MOV, MKV, WebM). Max {MAX_CLIPS} clips, 2 GB each.
+          Upload one or more video clips (MP4, MOV, AVI, WebM). Max {MAX_CLIPS} clips, {MAX_FILE_SIZE_LABEL} each.
         </p>
       </div>
 
@@ -178,7 +186,7 @@ export function UploadClipsPage() {
             <p className="text-sm font-semibold">
               Drag &amp; drop clips here, or click to browse
             </p>
-            <p className="text-xs text-brand-500">MP4, MOV, MKV, WebM — up to 2 GB each</p>
+            <p className="text-xs text-brand-500">MP4, MOV, AVI, WebM — up to {MAX_FILE_SIZE_LABEL} each</p>
           </>
         )}
       </div>

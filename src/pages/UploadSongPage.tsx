@@ -10,17 +10,24 @@ import { EphemeralWarningBanner } from '@/components/EphemeralWarningBanner'
 import { cn, formatMs, formatBytes } from '@/lib/utils'
 import type { SSEAudioAnalysed, SSEAudioAnalysisFailed } from '@/types'
 
-const ACCEPTED_MIME = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/ogg', 'audio/flac']
-const ACCEPTED_EXT = ['.mp3', '.m4a', '.wav', '.aac', '.ogg', '.flac']
-const MAX_FILE_SIZE_BYTES = 500 * 1024 * 1024 // 500 MB
+// Spec-required formats: mp3, wav, aac
+const ACCEPTED_MIME = ['audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/aac', 'audio/x-aac']
+const ACCEPTED_EXT = ['.mp3', '.wav', '.aac']
+
+// All limits come from env vars — never hardcoded
+const MAX_FILE_SIZE_BYTES = Number(import.meta.env.VITE_MAX_AUDIO_SIZE_BYTES ?? 500 * 1024 * 1024)
+const MAX_FILE_SIZE_LABEL = (() => {
+  const mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`
+})()
 
 function validateAudioFile(file: File): string | null {
-  const ext = '.' + file.name.split('.').pop()?.toLowerCase()
+  const ext = '.' + (file.name.split('.').pop()?.toLowerCase() ?? '')
   if (!ACCEPTED_MIME.includes(file.type) && !ACCEPTED_EXT.includes(ext)) {
-    return 'Unsupported format. Please upload MP3, M4A, WAV, AAC, OGG, or FLAC.'
+    return `Unsupported format "${ext.slice(1).toUpperCase()}". Please upload MP3, WAV, or AAC.`
   }
   if (file.size > MAX_FILE_SIZE_BYTES) {
-    return 'File too large. Maximum size is 500 MB for audio.'
+    return `File too large. Maximum size is ${MAX_FILE_SIZE_LABEL} for audio.`
   }
   return null
 }
@@ -163,7 +170,7 @@ export function UploadSongPage() {
       <div>
         <h1 className="text-2xl font-bold text-gray-900">Upload Your Song</h1>
         <p className="mt-1 text-sm text-gray-500">
-          Upload the audio track for your HypeReel. MP3, M4A, WAV, AAC, OGG, or FLAC — up to 500 MB.
+          Upload the audio track for your HypeReel. MP3, WAV, or AAC — up to {MAX_FILE_SIZE_LABEL}.
         </p>
       </div>
 
@@ -295,7 +302,7 @@ export function UploadSongPage() {
           <p className="text-sm font-semibold text-brand-700">
             Drag &amp; drop your song here, or click to browse
           </p>
-          <p className="text-xs text-brand-500">MP3, M4A, WAV, AAC, OGG, FLAC — up to 500 MB</p>
+          <p className="text-xs text-brand-500">MP3, WAV, AAC — up to {MAX_FILE_SIZE_LABEL}</p>
         </div>
       )}
 
