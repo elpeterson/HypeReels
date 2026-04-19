@@ -1210,7 +1210,7 @@ ssh root@192.168.1.100 \
 # Allow up to 60 seconds for in-flight jobs to complete before force-stop
 
 # Step 2 — Stop API (stops accepting new requests; cleanup workers finish)
-pct exec 113 -- pm2 stop hypereels-api
+pct exec 113 -- systemctl stop hypereels-api
 sleep 10
 pct stop 113
 
@@ -1405,7 +1405,7 @@ curl -sf http://localhost:8000/health
 | Redis | Docker container, no auth | CT 114, requirepass set |
 | MinIO | Docker container, minioadmin/minioadmin | CT 115, dedicated service account |
 | TLS | None (localhost) | Cloudflare + NPM Let's Encrypt |
-| Process manager | docker-compose restart | PM2 + systemd |
+| Process manager | docker-compose restart | systemd (hypereels-api.service); PM2 dev-only |
 | Workers | Single container, all workers | docker-compose.workers.yml on Quorra |
 | Metrics | /metrics on :3001 (local only) | Scraped by Quorra Prometheus |
 
@@ -1445,7 +1445,7 @@ pct exec 113 -- bash -c "
   git pull origin main
   cd server && npm ci --omit=dev
   npm run build
-  pm2 reload hypereels-api --update-env
+  systemctl restart hypereels-api
 "
 
 # Verify

@@ -16,9 +16,9 @@
 - **CPU:** Dual Intel Xeon X5650 — 24 logical threads @ 2.67 GHz (Westmere-EP)
 - **RAM:** 144 GiB installed; 5.59 GB used / 141.62 GB free (live)
 - **Storage pools (actual names):**
-  - `ISO_Storage`: 898.68 GB, 0.0% used — designated for MinIO object storage
-  - `vm_storage`: 430.68 GB ZFS, 2.2% used — designated for PostgreSQL LXC
-  - `storage_1tb`: 899.25 GB, 0.1% used — overflow / ISO storage
+  - `ISO_Storage`: 898.68 GB, 0.0% used — ISO images only; do NOT use for MinIO or databases (dir-type pool)
+  - `vm_storage`: 430.68 GB ZFS, 2.2% used — API LXC (CT 113) and Redis LXC (CT 114) OS volumes
+  - `storage_1tb`: 899.25 GB ZFS, 0.1% used — MinIO LXC (CT 115) data directory (CORRECT pool for MinIO)
   - `utility_146`: 131.78 GB, 0.0% used
   - `local-zfs`: 126.53 GB ZFS, 1.1% used — OS root
 - **Network:** 4× GbE NICs
@@ -45,23 +45,23 @@
 
 | Workload | Host | Rationale |
 |----------|------|-----------|
-| REST API server | Case (Proxmox LXC) | CPU-bound, no GPU requirement |
-| PostgreSQL database | Case (Proxmox LXC) | Persistent relational store, CPU/RAM sufficient |
-| Redis (job queue + session cache) | Case (Proxmox LXC) | In-memory, low resource footprint |
-| MinIO object storage | Case (Proxmox LXC) | Serves from local storage array |
-| InsightFace person detection worker | Quorra (Docker) | GPU-accelerated inference requires GTX 1080 Ti |
-| librosa audio analysis worker | Quorra (Docker) | Benefits from co-location with GPU node; CPU-bound but avoids LXC overhead |
-| FFmpeg video rendering worker | Quorra (Docker) | CPU/GPU encode on same host as ML workers |
+| REST API server | Case (Proxmox LXC CT 113) | CPU-bound, no GPU requirement |
+| PostgreSQL database | Quorra (Docker — hypereels-postgres, port 7432) | Co-located with other Postgres containers on Quorra; not on Case (see ADR-005) |
+| Redis (job queue + session cache) | Case (Proxmox LXC CT 114) | In-memory, low resource footprint |
+| MinIO object storage | Case (Proxmox LXC CT 115, storage_1tb pool) | Serves from local storage array |
+| InsightFace person detection worker | Quorra (Docker) | CPU-only per ADR-013; GTX 1080 Ti reserved for Frigate and FileFlows |
+| librosa audio analysis worker | Quorra (Docker) | Co-located with other Python workers; CPU-only |
+| FFmpeg video rendering worker | Quorra (Docker) | CPU encode (x264) on same host as ML workers |
 
 ### Open-Source Service Replacements
 
 | Previously Assumed (Cloud) | Self-Hosted Replacement | Notes |
 |---------------------------|------------------------|-------|
-| AWS Rekognition (person detection) | **InsightFace** (self-hosted, GPU-accelerated on Quorra) | Same output contract: thumbnails, confidence scores, appearance timestamps |
-| Cloudflare R2 (object storage) | **MinIO** (self-hosted on Case) | S3-compatible API; presigned URLs replace R2 signed URLs |
-| Neon (managed PostgreSQL) | **PostgreSQL** (self-hosted on Case LXC) | Standard Postgres; no managed-service extensions required |
-| Upstash (managed Redis) | **Redis** (self-hosted on Case LXC) | Standard Redis; no Upstash-specific features used |
-| Railway.app (container hosting) | **Proxmox LXC / Docker on Case** | All API and data containers run on Case |
+| AWS Rekognition (person detection) | **InsightFace** (self-hosted, CPU-only on Quorra per ADR-013) | Same output contract: thumbnails, confidence scores, appearance timestamps |
+| Cloudflare R2 (object storage) | **MinIO** (self-hosted on Case CT 115, storage_1tb ZFS pool) | S3-compatible API; presigned URLs replace R2 signed URLs |
+| Neon (managed PostgreSQL) | **PostgreSQL** (self-hosted on Quorra Docker, port 7432) | Standard Postgres; runs as hypereels-postgres Docker container on Quorra |
+| Upstash (managed Redis) | **Redis** (self-hosted on Case LXC CT 114) | Standard Redis; no Upstash-specific features used |
+| Railway.app (container hosting) | **Proxmox LXC (Case) + Docker (Quorra)** | API/data services on Case; Python workers + DB on Quorra |
 
 ---
 
