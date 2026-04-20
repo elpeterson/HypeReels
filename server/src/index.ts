@@ -44,14 +44,6 @@ import { startAssemblyWorker } from './workers/assemblyWorker.js';
 import { startCleanupWorker } from './workers/cleanupWorker.js';
 import { startValidationWorker } from './workers/validationWorker.js';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function requireEnv(name: string): string {
-  const val = process.env[name];
-  if (!val) throw new Error(`Missing required environment variable: ${name}`);
-  return val;
-}
-
 // ─── Prometheus metrics setup ─────────────────────────────────────────────────
 
 // Enable default Node.js runtime metrics (event loop lag, GC, heap, etc.)
@@ -76,7 +68,8 @@ const bullmqJobsTotal = new promClient.Counter({
   labelNames: ['queue', 'status'] as const,
 });
 
-const activeSessionsTotal = new promClient.Gauge({
+// Gauge self-registers with prom-client on construction; no reference needed.
+new promClient.Gauge({
   name: 'active_sessions_total',
   help: 'Number of active (non-deleted, non-complete) sessions in the database',
   async collect() {
