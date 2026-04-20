@@ -112,7 +112,8 @@ def extract_beats(y: np.ndarray, sr: float) -> tuple[float, np.ndarray]:
         # Try madmom fallback
         try:
             from madmom.features.beats import RNNBeatProcessor, BeatTrackingProcessor
-            import tempfile, soundfile as sf
+            import tempfile
+            import soundfile as sf
 
             # madmom requires a file path; write a temp wav
             fd, tmp_wav = tempfile.mkstemp(suffix=".wav", dir="/tmp/hypereels")
