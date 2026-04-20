@@ -12,6 +12,7 @@
  *  8. Listen
  *  9. Wire SIGTERM/SIGINT for graceful shutdown
  */
+import { fileURLToPath } from 'url';
 import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -351,7 +352,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('Fatal startup error:', err);
-  process.exit(1);
-});
+// Only auto-start when this file is the process entry point.
+// Guards against process.exit() being called when tests import buildApp.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
+  });
+}
