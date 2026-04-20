@@ -1,761 +1,1111 @@
 # HypeReels Test Plan
 
 > Owner: QA Engineer
-> Last updated: 2026-04-07
+> Last updated: 2026-04-19
 > Model: claude-sonnet-4-6
 
 ---
 
-## 1. Overview
-
-### Product
-
-HypeReels is an ephemeral, session-scoped web application that accepts user-uploaded video clips and an audio track, runs an asynchronous AI pipeline to detect persons (InsightFace CPU-only), analyse beat structure (librosa), and assemble a beat-synchronised highlight reel, then delivers a single downloadable MP4 and permanently destroys all uploaded and generated assets.
+## 1. Strategy
 
 ### Scope
 
-All twenty-one MVP user stories (STORY-001 through STORY-021) across the full stack:
+All twenty-six MVP user stories (STORY-001 through STORY-026) across the full stack:
 
-- Fastify REST API (Node.js 20, Case CT 113)
-- PostgreSQL 18 session/job state (Quorra Docker hypereels-postgres, 192.168.1.100:7432)
-- Redis 7 job queue and pub/sub (Case CT 114, 192.168.1.137:6379)
-- MinIO object storage with ILM lifecycle policy (Case CT 115, 192.168.1.138:9000)
-- Python workers: audio analysis (librosa), person detection (InsightFace), assembly (FFmpeg)
+- Fastify REST API (Node.js 20, Case CT 113 / single-machine Docker)
+- PostgreSQL 18 session/job state (co-located Docker container, per ADR-019)
+- Redis 7 job queue and pub/sub (co-located LXC or Docker container)
+- MinIO object storage with ILM lifecycle policy
+- Python workers: audio analysis (librosa), person detection (InsightFace CPU-only), assembly (FFmpeg)
 - React SPA (Vite, Zustand, Tailwind)
-- Infrastructure: Proxmox LXC containers, Unraid Docker containers, NPM proxy host, Cloudflare tunnel
+- Deployment: Profile 1 (CPU-only single machine) and Profile 2 (GPU-enabled single machine)
 
-### Test Objectives
+### Objectives
 
-1. Verify all STORY-001–021 acceptance criteria are testable and pass.
+1. Verify all STORY-001–026 acceptance criteria are testable and produce a pass/fail signal.
 2. Confirm session lifecycle state machine: `active → locked → complete → deleted`.
-3. Confirm the `'destroyed'` status anomaly (C6) does not enter the database (only `'deleted'` is a valid CHECK constraint value).
-4. Confirm the `r2_key` schema column name (C5) is used consistently by all application code (architecture uses `minio_key`; schema uses `r2_key`).
-5. Verify MinIO ILM `session_ttl=true` tag is applied at upload time (I8).
-6. Verify cleanup is idempotent and handles missing objects gracefully (I9).
-7. Verify clip status transitions occur correctly even without a separate validation worker module (I10).
-8. Verify `GET /sessions/:id/reel` endpoint (C7) is covered by tests despite being absent from the OpenAPI spec.
-9. Confirm InsightFace initialises with `CPUExecutionProvider` only (ADR-013).
+3. Confirm InsightFace initialises with `CPUExecutionProvider` only (ADR-013).
+4. Confirm the `minio_key` schema column name is used consistently by all application code.
+5. Verify MinIO ILM `session_ttl=true` tag is applied at upload time.
+6. Verify cleanup is idempotent and handles missing objects gracefully.
+7. Confirm both single-system deployment profiles start cleanly from `docker compose up -d`.
+8. Confirm Profile 3 (split-system) deprecation notice is in place and no active docs promote it.
+9. Confirm no hardcoded IPs appear in generic deployment documentation.
 
-### Out of Scope
+### Risk Areas
 
-- Multi-person selection (post-MVP)
-- Spotify integration (post-MVP)
-- User authentication and persistent storage (post-MVP)
-- Mobile app (post-MVP)
-- GPU-accelerated InsightFace (deferred per ADR-013)
-- Staging environment (no staging; local Docker Compose is dev environment)
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|-----------|
+| ADR-003 stale Rekognition code in main.py | Resolved (main.py now calls detect_persons() correctly) | P0 blocker if regressed | TC-013 + TC-016 catch any regression |
+| ADR-006 r2_client.py renamed to minio_client.py | Resolved per architecture doc | Runtime import failure | TC-033 (column/import consistency) |
+| InsightFace GPU contention (Frigate on Quorra) | Resolved by CPU-only mode | Service degradation | TC-013 verifies CPUExecutionProvider |
+| Session cleanup leaves orphaned MinIO objects | Medium | Storage leak | TC-028, TC-029, TC-030 |
+| Highlights total > song duration causes generation error | Medium | User-facing failure | TC-022, TC-024 cover truncation |
+| Profile 3 docs mislead deployers | Low (marked deprecated) | Wasted deployer time | TC-050 checks deprecation notice |
+| Hardcoded IPs in profile docs | Low (fixed per ADR-019) | Non-portable docs | TC-051, TC-052 scan docs |
 
----
+### Test Levels
 
-## 2. Test Strategy
+| Level | Tool | Location | When Run |
+|-------|------|----------|----------|
+| Unit | pytest | `workers/tests/` | Every commit |
+| Unit | Vitest | `server/src/**/*.test.ts` | Every commit |
+| Integration | Vitest + real services | `server/tests/integration/` | Pre-merge |
+| E2E | Playwright | `e2e/` | Planned post-MVP |
+| Deployment / smoke | shell script | `scripts/smoke-test.sh` | Post-deploy |
+| Performance | Manual / bench | `workers/tests/test_performance.py` | Sprint-end |
 
-### 2.1 Unit Tests
+### CI Configuration
 
-**Python (pytest)**
-
-- Location: `workers/tests/`
-- Runner: `pytest workers/tests/ -v`
-- Scope: pure functions in `audio_analysis/`, `assembly/algorithm.py`, `person_detection/person_detection_worker.py`
-- No real media files required; synthetic numpy arrays and mock objects are used.
-- No network access, DB connections, or MinIO calls.
-
-**TypeScript (Vitest)**
-
-- Location: `server/src/**/*.test.ts` and `server/tests/`
-- Runner: `vitest run` from repo root
-- Scope: pure library functions in `server/src/lib/` (cleanup, r2 key helpers)
-- All external dependencies (MinIO S3 client, PostgreSQL pool) are mocked with `vi.mock`.
-
-### 2.2 Integration Tests
-
-**API integration (Vitest + real services via Docker Compose)**
-
-- Location: `server/tests/integration/`
-- Runner: `docker-compose -f docker-compose.test.yml up -d && vitest run --project integration`
-- Real PostgreSQL, Redis, and MinIO containers are spun up.
-- No mocking of DB or storage clients; actual HTTP requests hit the Fastify server.
-- Each test creates its own session and tears it down via `DELETE /sessions/:id`.
-- Media files are small synthetic fixtures (< 1 MB).
-
-**Python integration (pytest + real services)**
-
-- Location: `workers/tests/integration/` (future sprint — not in this plan's automation scope)
-- Blocked on CI having access to MinIO and PostgreSQL containers.
-
-### 2.3 End-to-End Tests
-
-- Tool: Playwright
-- Location: `e2e/`
-- Runner: `playwright test`
-- Covers the happy-path seven-step wizard: Upload Clips → Upload Song → Select Person → Mark Highlights → Review → Generate → Download.
-- Uses small fixture video files (< 5 s) and a synthetic audio file.
-- Requires full Docker Compose stack including Python workers.
-- **Status: planned for post-MVP sprint; not included in this test plan's automation deliverables.**
-
-### 2.4 Performance Tests
-
-See Section 6.
-
-### 2.5 Manual / Exploratory Tests
-
-- Browser UX validation across Chrome, Firefox, Safari.
-- Drag-and-drop file upload.
-- Mobile viewport (< 768 px) step indicator collapse.
-- Tab takeover scenario (STORY-018).
-- SSE reconnection after browser sleep.
-- Download of a large file (> 500 MB) via presigned URL.
+```yaml
+# .github/workflows/test.yml (or equivalent)
+jobs:
+  python-unit:
+    steps:
+      - run: pip install -r workers/requirements.txt
+      - run: pytest workers/tests/ -v --tb=short
+  node-unit:
+    steps:
+      - run: npm ci --prefix server
+      - run: npm run test --prefix server
+  integration:
+    services:
+      postgres: { image: "postgres:18", env: { POSTGRES_PASSWORD: test } }
+      redis:    { image: "redis:7" }
+      minio:    { image: "minio/minio", command: "server /data" }
+    steps:
+      - run: npm run test:integration --prefix server
+```
 
 ---
 
-## 3. Story → Test Coverage Matrix
+## 2. Environment
 
-| Story | Title | Type | Test File(s) | Pass Criteria | Status |
-|-------|-------|------|-------------|---------------|--------|
-| STORY-001 | Create anonymous session | Integration | `server/tests/integration/sessions.test.ts` | POST /sessions → 201, token UUID, stored in localStorage | ⚠️ partial |
-| STORY-002 | Upload video clips | Integration | `server/tests/integration/clips.test.ts` | POST /sessions/:id/clips → 202, clip_id returned, MinIO object created | ❌ missing |
-| STORY-003 | Validate clip format/size | Integration + Unit | `server/tests/integration/clips.test.ts` | Invalid MIME → 422, oversized → 422, valid → 202 | ❌ missing |
-| STORY-004 | View clip list with thumbnails | Integration | `server/tests/integration/clips.test.ts` | GET /sessions/:id/clips returns correct schema | ❌ missing |
-| STORY-005 | Upload audio track | Integration | `server/tests/integration/audio.test.ts` | POST /sessions/:id/audio → 202, audio_id returned | ❌ missing |
-| STORY-006 | Validate audio + trigger analysis | Integration + Unit | `server/tests/integration/audio.test.ts`, `workers/tests/test_audio_analysis.py` | Invalid audio → 422; valid → analysis job queued | ✅ covered (audio analysis unit tests) |
-| STORY-007 | Trigger person detection | Integration | `server/tests/integration/detection.test.ts` | POST /sessions/:id/detect → 202, jobs queued | ❌ missing |
-| STORY-008 | Select person of interest | Integration | `server/tests/integration/persons.test.ts` | PUT /sessions/:id/person-of-interest → 200 | ❌ missing |
-| STORY-009 | Handle no persons detected | Unit | `workers/tests/test_person_detection.py` | Empty clip returns empty persons list, not error | ❌ missing |
-| STORY-010 | Mark highlight segments | Integration | `server/tests/integration/highlights.test.ts` | PUT /sessions/:id/clips/:id/highlights → 200, DB upserted | ❌ missing |
-| STORY-011 | Enforce highlight duration constraints | Unit | `workers/tests/test_assembly_worker.py` | Highlights > song → EDL truncated, no error raised | ✅ covered (test_algorithm.py) |
-| STORY-012 | Review and edit highlights | Integration | `server/tests/integration/highlights.test.ts` | Session locked on generate; read-only response for edits | ❌ missing |
-| STORY-013 | Submit generation job + progress | Integration | `server/tests/integration/generation.test.ts` | POST /sessions/:id/generate → 202, job_id returned, SSE events fire | ❌ missing |
-| STORY-014 | Display status on tab return | Integration | `server/tests/integration/sessions.test.ts` | GET /sessions/:id/state returns correct status + step | ⚠️ partial |
-| STORY-015 | Download completed HypeReel | Integration | `server/tests/integration/download.test.ts` | GET /sessions/:id/reel returns presigned URL; file bytes non-empty | ❌ missing |
-| STORY-016 | Permanently delete session assets | Unit + Integration | `server/src/workers/cleanupWorker.test.ts` | MinIO objects deleted; DB rows deleted; idempotent on re-run | ❌ missing |
-| STORY-017 | Global error boundary | Manual | n/a | JS exception → error screen; 500 response → error screen | Manual only |
-| STORY-018 | Prevent simultaneous sessions | Manual + Integration | `server/tests/integration/sessions.test.ts` | BroadcastChannel takeover warning shown | ⚠️ partial (API side only) |
-| STORY-019 | Step navigation indicator | Manual | n/a | Progress indicator renders all 7 steps; active step highlighted | Manual only |
-| STORY-020 | Deploy full stack | Infrastructure | `server/tests/smoke/smoke.test.ts` | Health check passes; all inter-service connections healthy | ❌ missing |
-| STORY-021 | GPU contention mitigation | Unit + Manual | `workers/tests/test_person_detection.py` | CPUExecutionProvider verified; CPU fallback path smoke-tested | ❌ missing |
+### Dependencies
+
+| Service | Version | Purpose |
+|---------|---------|---------|
+| PostgreSQL | 18 | Session/job state |
+| Redis | 7 | BullMQ + SSE pub/sub |
+| MinIO | latest | Object storage (S3-compatible) |
+| Node.js | 20 LTS | API server + BullMQ workers |
+| Python | 3.12 | Audio analysis, person detection, assembly |
+| FFmpeg | 6+ | Video assembly (in worker container) |
+| InsightFace buffalo_l | latest | Person detection (CPU-only) |
+
+### Fixture Media
+
+| Fixture | Size | Description | Used In |
+|---------|------|-------------|---------|
+| `fixtures/tiny.mp4` | < 200 KB | Valid 2-second H.264 clip, 1 person visible | TC-005, TC-012, TC-020 |
+| `fixtures/tiny_audio.mp3` | < 50 KB | Valid 3-second 128 kbps MP3, audible beat | TC-010, TC-020 |
+| `fixtures/corrupt.mp4` | 1 KB | Truncated file with `.mp4` extension | TC-006 (mime sniff) |
+| `fixtures/zero_byte.mp4` | 0 bytes | Empty file | TC-007 (zero-byte rejection) |
+| `fixtures/too_large.mp4` | 2 GB+1 byte | Just over the 2 GB clip limit | TC-007 (size boundary) |
+| `fixtures/no_faces.mp4` | < 200 KB | Valid 2-second clip, no people | TC-016 |
+| `fixtures/silent_audio.mp3` | < 50 KB | All-zero audio, valid MP3 container | EC-005 |
+| `fixtures/audio.wav` | < 200 KB | Valid WAV file | TC-011 (format acceptance) |
+
+All fixtures must be deterministic (checked into the repo or generated with a fixed seed).
+No system clock or random data is used in any test.
+
+### Setup Steps
+
+```bash
+# 1. Start test services
+docker compose -f docker-compose.test.yml up -d
+
+# 2. Run migrations
+cd server && npm run db:migrate
+
+# 3. Create MinIO test bucket
+mc mb local/hypereels-test
+
+# 4. Run unit tests
+pytest workers/tests/ -v
+cd server && npx vitest run
+
+# 5. Run integration tests
+cd server && npx vitest run --project integration
+
+# 6. Teardown
+docker compose -f docker-compose.test.yml down -v
+```
+
+### Environment Variables for Tests
+
+```env
+DATABASE_URL=postgresql://hypereels:test@localhost:5432/hypereels_test
+REDIS_URL=redis://localhost:6379
+MINIO_ENDPOINT=http://localhost:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=hypereels-test
+PYTHON_WORKER_URL=http://localhost:8000
+SESSION_TTL_HOURS=24
+CLEANUP_GRACE_MS=300000
+```
 
 ---
 
-## 4. Critical Path Test Cases
+## 3. Test Cases
 
 ### TC-001: Session Creation Returns Valid Token
-
-- **Story:** STORY-001
-- **Type:** Integration
-- **Preconditions:** API server running; PostgreSQL reachable
-- **Steps:**
+- Story: STORY-001
+- Type: Unit (mocked DB)
+- Preconditions: API server built; DB client mocked
+- Steps:
   1. POST `/sessions` with no body
   2. Verify HTTP 201
-  3. Verify response body has `session_id` (UUID format) and `token` (UUID format)
-  4. Verify a row exists in `sessions` table with `status = 'active'` and `current_step = 'upload-clips'`
-- **Expected:** 201 response; valid UUIDs; DB row created
-- **Priority:** P0
+  3. Verify response body has `session_id` (UUID) and `token` (UUID)
+  4. Verify INSERT into sessions SQL was called
+- Expected: 201 response; valid UUIDs; DB insert called
+- Priority: P0
 
 ### TC-002: Session Token Required for Protected Routes
-
-- **Story:** STORY-001
-- **Type:** Integration
-- **Preconditions:** A session exists
-- **Steps:**
-  1. POST `/sessions` → capture token
-  2. GET `/sessions/:id/state` with no Authorization header → expect 401
-  3. GET `/sessions/:id/state` with `Authorization: Bearer invalid-uuid` → expect 404
-  4. GET `/sessions/:id/state` with valid Bearer token → expect 200
-- **Expected:** 401 for missing token; 404 for invalid token; 200 for valid
-- **Priority:** P0
+- Story: STORY-001
+- Type: Unit (mocked DB)
+- Preconditions: API built; DB mocked
+- Steps:
+  1. GET `/sessions/:id/state` with no Authorization header — expect 401 with `MISSING_TOKEN`
+  2. GET `/sessions/:id/state` with `Authorization: Basic <token>` — expect 401
+  3. GET `/sessions/:id/state` with `Authorization: Bearer invalid-token-not-in-db` — expect 404 with `SESSION_NOT_FOUND`
+  4. GET `/sessions/:id/state` with valid Bearer token (DB returns session) — expect 200
+- Expected: 401 for missing/malformed; 404 for unknown; 200 for valid
+- Priority: P0
 
 ### TC-003: Deleted Session Returns 410
+- Story: STORY-001
+- Type: Unit (mocked DB)
+- Preconditions: DB mocked to return session with `status='deleted'`
+- Steps:
+  1. GET `/sessions/:id/state` with valid token
+  2. Assert HTTP 410
+  3. Assert `error.code == 'SESSION_GONE'`
+  4. Assert `error.message` contains "deleted" or "expired"
+- Expected: 410 Gone; SESSION_GONE error code
+- Priority: P0
 
-- **Story:** STORY-001
-- **Type:** Integration
-- **Preconditions:** A session exists; session row manually set to `status = 'deleted'`
-- **Steps:**
-  1. Create session
-  2. Directly update `sessions.status = 'deleted'` in DB
-  3. GET `/sessions/:id/state` with valid token
-- **Expected:** 410 Gone with `SESSION_GONE` error code
-- **Priority:** P0
-
-### TC-004: Session Status Does Not Use 'destroyed' Value
-
-- **Story:** STORY-016 (Known Issue C6)
-- **Type:** Unit
-- **Preconditions:** None (schema validation)
-- **Steps:**
-  1. Attempt to INSERT a session row with `status = 'destroyed'` directly via SQL
-- **Expected:** PostgreSQL CHECK constraint violation; only `active`, `locked`, `complete`, `deleted` are valid
-- **Priority:** P0
+### TC-004: Session Status Constraint — 'destroyed' Never Stored
+- Story: STORY-016 (Known Issue C6)
+- Type: Unit (mocked DB)
+- Preconditions: cleanupSession available; mocks in place
+- Steps:
+  1. Run `cleanupSession(sessionId)` with mocked storage and DB
+  2. Capture all SQL calls to the `query` mock
+  3. Assert at least one SQL call contains `'deleted'` in a status update
+  4. Assert NO SQL call contains `'destroyed'`
+- Expected: Only `'deleted'` is used; `'destroyed'` never appears
+- Priority: P0
 
 ### TC-005: Valid Video Clip Upload Accepted
-
-- **Story:** STORY-002, STORY-003
-- **Type:** Integration
-- **Preconditions:** Active session; MinIO bucket exists
-- **Steps:**
-  1. POST `/sessions/:id/clips` with multipart form containing a small valid `.mp4` file and `Content-Type: video/mp4`
-  2. Verify 202 response with `clip_id`
-  3. Verify MinIO object exists at `uploads/{session_id}/{clip_id}.mp4`
-  4. Verify `clips` DB row with `status = 'uploading'`
-- **Expected:** 202; MinIO object present; DB row created
-- **Priority:** P0
+- Story: STORY-002, STORY-003
+- Type: Integration (real MinIO + DB)
+- Preconditions: Active session; MinIO bucket exists
+- Steps:
+  1. POST `/sessions/:id/clips` multipart with `fixtures/tiny.mp4` and `Content-Type: video/mp4`
+  2. Assert HTTP 202 with `clip_id` (UUID)
+  3. Assert MinIO object exists at `uploads/{session_id}/clips/{clip_id}.mp4`
+  4. Assert `clips` DB row with `status='uploading'`
+- Expected: 202; MinIO object present; DB row created
+- Priority: P0
 
 ### TC-006: Invalid Format Rejected Before Upload
+- Story: STORY-003
+- Type: Integration (real MinIO + DB)
+- Preconditions: Active session
+- Steps:
+  1. POST `/sessions/:id/clips` with `fixtures/corrupt.mp4` and `Content-Type: application/pdf`
+  2. Assert HTTP 422
+  3. Assert `error.code == 'UNSUPPORTED_FORMAT'`
+  4. Assert no MinIO object was created
+  5. Assert no `clips` DB row was created
+- Expected: 422; no storage write; no DB row
+- Priority: P0
 
-- **Story:** STORY-003
-- **Type:** Integration
-- **Preconditions:** Active session
-- **Steps:**
-  1. POST `/sessions/:id/clips` with a `.pdf` file and `Content-Type: application/pdf`
-  2. Verify 422 response with `UNSUPPORTED_FORMAT` error code
-- **Expected:** 422; no MinIO object created; no DB row created
-- **Priority:** P0
+### TC-007: Size Boundary — At Limit Passes, 1 Byte Over Returns 422
+- Story: STORY-003
+- Type: Integration (real MinIO + DB)
+- Preconditions: Active session
+- Steps:
+  1. Upload a clip of exactly 2 GB (2 147 483 648 bytes) — expect 202
+  2. Upload a clip of 2 GB + 1 byte (2 147 483 649 bytes) — expect 422 with `FILE_TOO_LARGE`
+- Expected: 202 at limit; 422 one byte over
+- Priority: P0
 
-### TC-007: File Size Limit Enforced
+### TC-007b: Zero-Byte Upload Rejected Without Crash
+- Story: STORY-003
+- Type: Integration (real MinIO + DB)
+- Preconditions: Active session
+- Steps:
+  1. POST `/sessions/:id/clips` with `fixtures/zero_byte.mp4` (0 bytes)
+  2. Assert HTTP 422 or 400
+  3. Assert server does not return 500
+  4. Assert API remains responsive (GET `/health` returns 200)
+- Expected: Non-500 error response; server remains healthy
+- Priority: P0
 
-- **Story:** STORY-003
-- **Type:** Integration
-- **Preconditions:** Active session
-- **Steps:**
-  1. POST `/sessions/:id/clips` streaming exactly 2 GB + 1 byte
-- **Expected:** Upload interrupted; 422 or stream destroyed; MinIO object cleaned up
-- **Priority:** P0
-
-### TC-008: Clip Count Limit Enforced
-
-- **Story:** STORY-002
-- **Type:** Integration
-- **Preconditions:** Active session with 10 existing valid clips
-- **Steps:**
+### TC-008: Clip Count Limit Enforced (10 max)
+- Story: STORY-002
+- Type: Integration (real DB)
+- Preconditions: Session with 10 existing valid clips in DB
+- Steps:
   1. POST `/sessions/:id/clips` with an 11th valid file
-- **Expected:** 422 with `CLIP_LIMIT_EXCEEDED` error code
-- **Priority:** P0
+  2. Assert HTTP 422 with `error.code == 'CLIP_LIMIT_EXCEEDED'`
+- Expected: 422; no new clip row created
+- Priority: P0
 
-### TC-009: MinIO Upload Tags Session TTL
-
-- **Story:** STORY-016 (Known Issue I8)
-- **Type:** Integration
-- **Preconditions:** MinIO ILM rule configured for `session_ttl=true`; active session
-- **Steps:**
-  1. POST `/sessions/:id/clips` with valid file
-  2. Use MinIO S3 API `GetObjectTagging` to retrieve tags on the uploaded object
-- **Expected:** Object has tag `session_ttl=true`
-- **Priority:** P1
-- **Note:** This test documents the intent from I8. If the application does not yet set the tag, this test will fail and expose the gap.
+### TC-009: MinIO Upload Tags Object with session_ttl=true
+- Story: STORY-016 (Implementation gap I8)
+- Type: Integration (real MinIO)
+- Preconditions: Active session; MinIO ILM rule configured for `session_ttl=true`
+- Steps:
+  1. POST `/sessions/:id/clips` with valid `fixtures/tiny.mp4`
+  2. Use MinIO S3 API `GetObjectTagging` on the uploaded object
+  3. Assert tag `session_ttl=true` is present
+- Expected: Object carries `session_ttl=true` tag
+- Priority: P1
 
 ### TC-010: Audio Upload Accepted and Analysis Job Queued
-
-- **Story:** STORY-005, STORY-006
-- **Type:** Integration
-- **Preconditions:** Active session; BullMQ connected
-- **Steps:**
-  1. POST `/sessions/:id/audio` with a small valid `.mp3` file
-  2. Verify 202 with `audio_id`
-  3. Verify BullMQ `audio-analysis` queue has a job for this audio track
-  4. Verify `audio_tracks` DB row with `analysis_status = 'pending'`
-- **Expected:** 202; job queued; DB row created
-- **Priority:** P0
+- Story: STORY-005, STORY-006
+- Type: Integration (real MinIO + Redis + DB)
+- Preconditions: Active session; BullMQ connected to Redis
+- Steps:
+  1. POST `/sessions/:id/audio` with `fixtures/tiny_audio.mp3`
+  2. Assert HTTP 202 with `audio_id` (UUID)
+  3. Assert BullMQ `audio-analysis` queue has a job with correct session and audio IDs
+  4. Assert `audio_tracks` DB row with `analysis_status='pending'`
+  5. Assert MinIO object exists at `uploads/{session_id}/audio.mp3`
+- Expected: 202; job queued; DB row created; MinIO object present
+- Priority: P0
 
 ### TC-011: Invalid Audio Format Rejected
-
-- **Story:** STORY-006
-- **Type:** Integration
-- **Preconditions:** Active session
-- **Steps:**
-  1. POST `/sessions/:id/audio` with a `.exe` file
-- **Expected:** 422 with `UNSUPPORTED_FORMAT`
-- **Priority:** P0
+- Story: STORY-006
+- Type: Integration (real MinIO + DB)
+- Preconditions: Active session
+- Steps:
+  1. POST `/sessions/:id/audio` with a `.exe` file and `Content-Type: application/octet-stream`
+  2. Assert HTTP 422 with `error.code == 'UNSUPPORTED_FORMAT'`
+- Expected: 422; no MinIO object created; no DB row
+- Priority: P0
 
 ### TC-012: Person Detection Triggered for All Valid Clips
-
-- **Story:** STORY-007
-- **Type:** Integration
-- **Preconditions:** Session with at least 2 valid clips (`status = 'valid'`, `detection_status = 'pending'`)
-- **Steps:**
+- Story: STORY-007
+- Type: Integration (real Redis + DB)
+- Preconditions: Session with 2 clips in `status='valid'`, `detection_status='pending'`
+- Steps:
   1. POST `/sessions/:id/detect`
-  2. Verify 202 with `queued` count equal to number of valid undetected clips
-  3. Verify BullMQ `person-detection` queue has jobs
-  4. Verify clips' `detection_status` transitions to `'processing'`
-- **Expected:** Jobs enqueued for each valid clip
-- **Priority:** P0
+  2. Assert HTTP 202 with `queued` count equal to 2
+  3. Assert BullMQ `person-detection` queue has 2 jobs
+  4. Assert both clips' `detection_status` transitions to `'processing'`
+- Expected: 2 jobs queued; clips marked processing
+- Priority: P0
 
 ### TC-013: InsightFace Initialises with CPUExecutionProvider Only
-
-- **Story:** STORY-021 (Known Issue ADR-013)
-- **Type:** Unit
-- **Preconditions:** None (mocked)
-- **Steps:**
+- Story: STORY-007, STORY-021 (ADR-013)
+- Type: Unit (mocked InsightFace)
+- Preconditions: None (mocked)
+- Steps:
   1. Mock `insightface.app.FaceAnalysis` constructor
-  2. Call `_get_insight_app()` from `person_detection_worker.py`
-  3. Assert `FaceAnalysis` was called with `providers=['CPUExecutionProvider']`
-  4. Assert `.prepare()` was called with `ctx_id=-1`
-- **Expected:** Only CPUExecutionProvider; ctx_id is -1 (CPU mode)
-- **Priority:** P0
+  2. Reset the module-level singleton (`_insight_app = None`)
+  3. Call `_get_insight_app()` from `person_detection_worker.py`
+  4. Assert `FaceAnalysis` called with `providers=['CPUExecutionProvider']`
+  5. Assert `'CUDAExecutionProvider'` does NOT appear in `providers`
+  6. Assert `.prepare()` called with `ctx_id=-1`
+- Expected: Only CPUExecutionProvider; ctx_id is -1
+- Priority: P0
 
 ### TC-014: Frame Sampling at 2fps Produces Correct Count
-
-- **Story:** STORY-007
-- **Type:** Unit
-- **Preconditions:** Synthetic test video file (10 s at 25 fps)
-- **Steps:**
-  1. Call `sample_frames(video_path, interval_sec=0.5)` on a 10 s video
-  2. Count returned frames
-- **Expected:** Approximately 20 frames (10 s / 0.5 s per frame = 20)
-- **Priority:** P1
+- Story: STORY-007
+- Type: Unit (mocked cv2)
+- Preconditions: Mocked `cv2.VideoCapture` for a 10-second 25fps clip
+- Steps:
+  1. Call `sample_frames(Path("/fake/video.mp4"), interval_sec=0.5)`
+  2. Assert returned list length is between 18 and 22 (≈20 frames)
+  3. Assert each element is a `(int, np.ndarray)` tuple
+  4. Assert timestamps are non-negative and in ascending order
+- Expected: ~20 frames; ascending timestamps; correct tuple type
+- Priority: P1
 
 ### TC-015: Cosine Similarity Threshold Groups Same-Person Embeddings
-
-- **Story:** STORY-008
-- **Type:** Unit
-- **Preconditions:** None
-- **Steps:**
-  1. Create two near-identical 512-dim numpy embeddings (cosine sim ≈ 0.9)
+- Story: STORY-008
+- Type: Unit (pure numpy)
+- Preconditions: None
+- Steps:
+  1. Create two near-identical 512-dim unit embeddings (cosine sim ≈ 0.99)
   2. Call `match_or_create_person(embedding_2, [{"person_ref_id": "uuid-1", "embedding": embedding_1}])`
-  3. Create two very different embeddings (cosine sim ≈ 0.1)
-  4. Call `match_or_create_person(embedding_b, [{"person_ref_id": "uuid-2", "embedding": embedding_a}])`
-- **Expected:** Same-person pair → returns `"uuid-1"` (reuse); Different pair → returns new UUID
-- **Priority:** P0
+  3. Assert result equals `"uuid-1"` (same person, existing ref reused)
+  4. Create two very different embeddings (cosine sim ≈ 0.05)
+  5. Call `match_or_create_person(different_embedding, [{"person_ref_id": "uuid-2", "embedding": different_base}])`
+  6. Assert result is a new UUID (different person)
+  7. Assert `FACE_COSINE_THRESHOLD == 0.45`
+- Expected: Same-person reuses ref_id; different person creates new UUID; threshold is 0.45
+- Priority: P0
 
 ### TC-016: Empty Clip Produces Empty Persons List (Not Error)
-
-- **Story:** STORY-009
-- **Type:** Unit
-- **Preconditions:** None
-- **Steps:**
-  1. Create a mock video that has no detectable faces (all-black frames)
-  2. Call `detect_faces_in_frame` on the frame; mock InsightFace to return `[]`
-  3. Invoke the detection pipeline; verify no exception raised
-- **Expected:** `{"clip_id": "...", "persons": []}` returned; `detection_status` set to `'complete'`
-- **Priority:** P0
+- Story: STORY-009
+- Type: Unit (mocked InsightFace)
+- Preconditions: None
+- Steps:
+  1. Mock `_get_insight_app()` to return an app whose `get()` returns `[]` (no faces)
+  2. Call `detect_faces_in_frame(black_frame)`
+  3. Assert result is `[]`
+  4. Assert no exception raised
+  5. Run `cluster_detections_within_clip([], {})` — assert returns `{}`
+- Expected: Empty list returned; no exception; detection_status set to 'complete' not 'failed'
+- Priority: P0
 
 ### TC-017: Highlight Stored and Validated in DB
-
-- **Story:** STORY-010
-- **Type:** Integration
-- **Preconditions:** Session with valid clip
-- **Steps:**
+- Story: STORY-010
+- Type: Integration (real DB)
+- Preconditions: Session with valid clip (`duration_ms=30000`)
+- Steps:
   1. PUT `/sessions/:id/clips/:clip_id/highlights` with `{"highlights": [{"start_ms": 1000, "end_ms": 5000}]}`
-  2. Verify 200
-  3. Verify `highlights` DB row exists with correct `start_ms`, `end_ms`
-- **Expected:** 200; DB row created
-- **Priority:** P0
+  2. Assert HTTP 200
+  3. Assert `highlights` DB row exists with `start_ms=1000`, `end_ms=5000`
+  4. Assert response includes `highlights` array with 1 entry containing `id`, `start_ms`, `end_ms`
+- Expected: 200; DB row created; response matches schema
+- Priority: P0
 
-### TC-018: Highlight Below 1-Second Duration Rejected
-
-- **Story:** STORY-010
-- **Type:** Integration
-- **Preconditions:** Session with valid clip
-- **Steps:**
+### TC-018: Highlight Below 1000ms Duration Rejected
+- Story: STORY-010
+- Type: Integration (real DB)
+- Preconditions: Session with valid clip
+- Steps:
   1. PUT `/sessions/:id/clips/:clip_id/highlights` with `{"highlights": [{"start_ms": 1000, "end_ms": 1500}]}`
-  2. Verify 422 (DB CHECK constraint `end_ms - start_ms >= 1000` violated)
-- **Expected:** 422 response; no DB row created
-- **Priority:** P0
+  2. Assert HTTP 422
+  3. Assert `error.code` indicates duration constraint violation
+  4. Assert no DB row created
+- Expected: 422; DB CHECK constraint violation (`end_ms - start_ms >= 1000`)
+- Priority: P0
 
 ### TC-019: Highlight End Greater than Clip Duration Returns 422
+- Story: STORY-010
+- Type: Integration (real DB)
+- Preconditions: Session with valid clip of `duration_ms=10000`
+- Steps:
+  1. PUT highlights with `{"highlights": [{"start_ms": 0, "end_ms": 15000}]}`
+  2. Assert HTTP 422
+  3. Assert `error.details` or message mentions `end_ms` exceeds clip duration
+- Expected: 422; no DB row created
+- Priority: P1
 
-- **Story:** STORY-010
-- **Type:** Integration
-- **Preconditions:** Session with valid clip of known duration
-- **Steps:**
-  1. PUT highlights with `end_ms` exceeding clip `duration_ms`
-- **Expected:** 422 validation error
-- **Priority:** P1
+### TC-019b: Overlapping Highlights Return 422 with Conflicting Range Details
+- Story: STORY-010
+- Type: Integration (real DB)
+- Preconditions: Session with valid clip of `duration_ms=30000`
+- Steps:
+  1. PUT highlights with two overlapping ranges: `[{start_ms:0,end_ms:5000},{start_ms:3000,end_ms:8000}]`
+  2. Assert HTTP 422
+  3. Assert `error.code` indicates overlapping ranges
+- Expected: 422 identifying the conflicting range
+- Priority: P1
 
 ### TC-020: Generation Job Submitted and Session Locked
-
-- **Story:** STORY-012, STORY-013
-- **Type:** Integration
-- **Preconditions:** Session with valid clip, analysed audio
-- **Steps:**
+- Story: STORY-012, STORY-013
+- Type: Integration (real DB + Redis)
+- Preconditions: Session with 1 valid clip, audio in `analysis_status='complete'`
+- Steps:
   1. POST `/sessions/:id/generate`
-  2. Verify 202 with `job_id`
-  3. Verify `sessions.status = 'locked'` in DB
-  4. Verify `generation_jobs` row with `status = 'queued'`
-- **Expected:** Session locked; job created
-- **Priority:** P0
+  2. Assert HTTP 202 with `job_id` (UUID)
+  3. Assert `sessions.status='locked'` in DB
+  4. Assert `generation_jobs` row with `status='queued'` and matching `session_id`
+  5. Assert BullMQ `generation` queue has a job
+- Expected: Session locked; job created; job queued
+- Priority: P0
 
 ### TC-021: Upload to Locked Session Returns 409
-
-- **Story:** STORY-012
-- **Type:** Integration
-- **Preconditions:** Session with `status = 'locked'`
-- **Steps:**
-  1. POST `/sessions/:id/clips` with valid file
-- **Expected:** 409 with `SESSION_LOCKED`
-- **Priority:** P0
+- Story: STORY-012
+- Type: Integration (real DB)
+- Preconditions: Session with `status='locked'`
+- Steps:
+  1. POST `/sessions/:id/clips` with valid `fixtures/tiny.mp4`
+  2. Assert HTTP 409 with `error.code == 'SESSION_LOCKED'`
+- Expected: 409; no new clip row created
+- Priority: P0
 
 ### TC-022: Assembly Worker Includes All Highlights in EDL
+- Story: STORY-011, STORY-013
+- Type: Unit (pure function)
+- Preconditions: None
+- Steps:
+  1. Build `AssemblyRequest` with 3 highlights on clip-1: `[{0,3000},{5000,8000},{10000,13000}]`
+  2. Call `build_edl(request)` with song_duration_ms=20000
+  3. Assert each highlight's time range appears in `edl.segments` as `source='highlight'`
+  4. Assert all 3 highlight clip_ids match `clip-1`
+- Expected: All 3 highlights present in EDL as highlight segments
+- Priority: P0
 
-- **Story:** STORY-011
-- **Type:** Unit
-- **Preconditions:** None (pure function)
-- **Steps:**
-  1. Build `AssemblyRequest` with 3 highlights of known time ranges
+### TC-023: Assembly EDL Segments Have Positive Duration
+- Story: STORY-013
+- Type: Unit (pure function)
+- Preconditions: None
+- Steps:
+  1. Build request with multiple clips and highlights
   2. Call `build_edl(request)`
-  3. Verify each highlight's `clip_id`, `start_ms`, `end_ms` appears in `edl.segments`
-- **Expected:** All 3 highlights present in EDL as segments with `source = 'highlight'`
-- **Priority:** P0
-
-### TC-023: Assembly EDL Segments Ordered Chronologically
-
-- **Story:** STORY-013
-- **Type:** Unit
-- **Preconditions:** None (pure function)
-- **Steps:**
-  1. Build request with multiple clips
-  2. Call `build_edl(request)`
-  3. Assert each segment's `start_ms` in the source clip is non-decreasing for the same clip
-- **Expected:** Segments ordered correctly
-- **Priority:** P1
+  3. Assert `seg.duration_ms > 0` for every segment
+  4. Assert `seg.end_ms > seg.start_ms` for every segment
+  5. Assert no segment has `duration_ms < 200` (minimum filter from architecture)
+- Expected: All segments have positive, valid durations ≥ 200ms
+- Priority: P1
 
 ### TC-024: EDL Total Duration Does Not Exceed Audio Duration
-
-- **Story:** STORY-011, STORY-013
-- **Type:** Unit
-- **Preconditions:** None
-- **Steps:**
-  1. Build request with `song_duration_ms = 10000`
+- Story: STORY-011, STORY-013
+- Type: Unit (pure function)
+- Preconditions: None
+- Steps:
+  1. Build request with `song_duration_ms=10000`
   2. Call `build_edl(request)`
   3. Assert `edl.target_duration_ms <= 10000`
-- **Expected:** EDL respects song boundary
-- **Priority:** P0
+- Expected: EDL respects song boundary
+- Priority: P0
 
-### TC-025: Beat-Sync Alignment Within 100ms Tolerance
-
-- **Story:** STORY-013
-- **Type:** Unit
-- **Preconditions:** Known beat timestamps
-- **Steps:**
-  1. Build request with explicit `beats_ms = [0, 500, 1000, 1500, ...]`
+### TC-025: Beat-Sync Cut Points Within 100ms of a Beat
+- Story: STORY-013
+- Type: Unit (pure function)
+- Preconditions: Known beat timestamps at 120 BPM
+- Steps:
+  1. Build request with explicit `beats_ms=[0,500,1000,1500,2000,...]`
   2. Call `build_edl(request)`
-  3. For each segment boundary, find nearest beat timestamp
+  3. For each segment boundary (`start_ms`), find nearest beat timestamp
   4. Assert `abs(segment_start_ms - nearest_beat_ms) <= 100`
-- **Expected:** All cut points within 100 ms of a beat
-- **Priority:** P1
+- Expected: All cut points within 100ms of a beat
+- Priority: P1
 
-### TC-026: Generation Failure Unlocks Session and Sets Status to 'failed'
-
-- **Story:** STORY-013
-- **Type:** Integration
-- **Preconditions:** Session in `'locked'` state with queued generation job
-- **Steps:**
-  1. Mock Python assembly worker to return 500
-  2. Trigger job processing
-  3. Verify `generation_jobs.status = 'failed'`
-  4. Verify `sessions.status = 'active'` (session unlocked for retry)
-- **Expected:** Job marked failed; session unlocked
-- **Priority:** P0
+### TC-026: Generation Failure Sets Status to 'failed' and Preserves Session
+- Story: STORY-013
+- Type: Integration (mocked Python worker)
+- Preconditions: Session locked with queued generation job
+- Steps:
+  1. Configure Python worker mock to return HTTP 500 for `/assemble-reel`
+  2. Trigger assembly worker job processing
+  3. Assert `generation_jobs.status='failed'` in DB
+  4. Assert `generation_jobs.error_message` is non-null
+  5. Assert session status is NOT 'deleted' (session preserved for retry/start-over)
+- Expected: Job marked failed; session preserved; error recorded
+- Priority: P0
 
 ### TC-027: Session State Restored on Page Reload
-
-- **Story:** STORY-014
-- **Type:** Integration
-- **Preconditions:** Session in `'complete'` state
-- **Steps:**
-  1. GET `/sessions/:id/state` with valid token
-  2. Verify `status = 'complete'` and `current_step = 'download'` in response
-- **Expected:** Correct state returned for step restoration
-- **Priority:** P0
+- Story: STORY-014
+- Type: Unit (mocked DB)
+- Preconditions: DB mocked with various session states
+- Steps:
+  1. Mock session in `status='complete'`, `current_step='download'`
+  2. GET `/sessions/:id/state` — assert `status='complete'`, `current_step='download'`
+  3. Mock session in `status='locked'`, `current_step='generate'`
+  4. GET `/sessions/:id/state` — assert `status='locked'`
+  5. Assert response includes `session_id`, `status`, `current_step`, `clips`, `audio`, `persons`, `latest_job`
+  6. Assert `audio=null` when no audio uploaded; `latest_job=null` when no job
+- Expected: All state fields returned correctly per session state
+- Priority: P0
 
 ### TC-028: Cleanup Deletes All MinIO Objects and DB Rows
-
-- **Story:** STORY-016
-- **Type:** Unit
-- **Preconditions:** Mocked MinIO client; mocked PostgreSQL pool
-- **Steps:**
-  1. Mock `listObjects` to return 3 keys
+- Story: STORY-016
+- Type: Unit (mocked MinIO + DB)
+- Preconditions: Mocked `listObjects`, `deleteObjects`, `query`, `withTransaction`
+- Steps:
+  1. Mock `listObjects` to return 3 keys across uploads/, generated/, thumbnails/
   2. Mock `deleteObjects` to return `[]` (no failures)
-  3. Mock `query` for DB operations
-  4. Call `cleanupSession(sessionId)`
-  5. Verify `deleteObjects` called with all 3 keys
-  6. Verify `DELETE FROM sessions` SQL was executed
-  7. Verify `CleanupResult.filesDeleted === 3` and `dbDeleted === true`
-- **Expected:** All objects deleted; DB row deleted; audit log emitted
-- **Priority:** P0
+  3. Call `cleanupSession(sessionId)`
+  4. Assert `deleteObjects` called with all 3 keys
+  5. Assert `DELETE FROM sessions` SQL executed with correct session ID
+  6. Assert `result.filesDeleted === 3` and `result.dbDeleted === true`
+  7. Assert session status update uses `'deleted'` not `'destroyed'`
+- Expected: All objects deleted; DB row deleted; audit log emitted; 'deleted' status used
+- Priority: P0
 
-### TC-029: Cleanup is Idempotent (Empty MinIO Prefix)
+### TC-029: Cleanup is Idempotent on Empty Storage
+- Story: STORY-016
+- Type: Unit (mocked storage + DB)
+- Preconditions: Mocked `listObjects` returning `[]` for all prefixes
+- Steps:
+  1. Call `cleanupSession(sessionId)`
+  2. Assert `deleteObjects` was NOT called
+  3. Assert `result.filesDeleted === 0` and `result.failedKeys === []`
+  4. Assert `result.dbDeleted === true` (DB cleanup still runs)
+  5. Assert no exception thrown
+- Expected: Graceful empty-cleanup; `{filesDeleted:0, failedKeys:[], dbDeleted:true}`
+- Priority: P0
 
-- **Story:** STORY-016 (Known Issue I9)
-- **Type:** Unit
-- **Preconditions:** Mocked clients
-- **Steps:**
-  1. Mock `listObjects` to return `[]`
-  2. Call `cleanupSession(sessionId)`
-  3. Verify no error thrown
-  4. Verify `deleteObjects` was not called
-- **Expected:** Returns `{ filesDeleted: 0, failedKeys: [], dbDeleted: true }` without error
-- **Priority:** P0
+### TC-030: Post-Cleanup Session Returns 410
+- Story: STORY-015, STORY-016
+- Type: Unit (mocked DB)
+- Preconditions: DB mocked to return session with `status='deleted'`
+- Steps:
+  1. GET `/sessions/:id/state` with the original token (session now `status='deleted'`)
+  2. Assert HTTP 410 Gone with `SESSION_GONE` error code
+- Expected: 410 Gone; cannot access deleted session
+- Priority: P0
 
-### TC-030: Post-Cleanup Session URL Returns 410
-
-- **Story:** STORY-015, STORY-016
-- **Type:** Integration
-- **Preconditions:** Session exists, then cleanup runs
-- **Steps:**
-  1. Create session
-  2. Call `cleanupSession(sessionId)` directly
-  3. GET `/sessions/:id/state` with the original token
-- **Expected:** 410 Gone
-- **Priority:** P0
-
-### TC-031: SSE Stream Delivers Events in Order
-
-- **Story:** STORY-013
-- **Type:** Integration
-- **Preconditions:** Active session; Redis connected
-- **Steps:**
-  1. Connect to `GET /sessions/:id/events`
-  2. Publish `generation-progress` then `generation-complete` events via Redis
-  3. Verify events received by SSE client in correct order
-- **Expected:** Both events received; `type` fields match published events
-- **Priority:** P1
+### TC-031: SSE Stream Delivers Events in Correct Order
+- Story: STORY-013
+- Type: Integration (real Redis)
+- Preconditions: Active session; Redis connected
+- Steps:
+  1. Connect to `GET /sessions/:id/events` via `EventSource`
+  2. Publish `generation-progress` event to Redis `session:{id}:events` channel
+  3. Publish `generation-complete` event
+  4. Assert both events received by SSE client in FIFO order
+  5. Assert `type` fields match published event types
+- Expected: Both events received in order; correct type field
+- Priority: P1
 
 ### TC-032: GET /sessions/:id/reel Returns Presigned URL
+- Story: STORY-015
+- Type: Integration (mocked DB + MinIO)
+- Preconditions: Session `status='complete'`; `generation_jobs.output_url` populated
+- Steps:
+  1. GET `/sessions/:id/reel` with valid token and `Accept: application/json`
+  2. Assert HTTP 200 with `download_url` (non-empty string, MinIO presigned URL format)
+  3. Assert `expires_at` field is a valid ISO 8601 timestamp
+- Expected: 200 with presigned URL; URL is non-empty
+- Priority: P1
 
-- **Story:** STORY-015 (Known Issue C7: endpoint exists in code, not in spec)
-- **Type:** Integration
-- **Preconditions:** Session in `'complete'` state; `generation_jobs.output_url` populated
-- **Steps:**
-  1. GET `/sessions/:id/reel` with valid token
-  2. Verify 200 or 302 with `output_url` or redirect to presigned URL
-- **Expected:** Non-empty URL returned; URL is a valid MinIO presigned URL
-- **Priority:** P1
+### TC-033: Schema Column Name Consistency (minio_key)
+- Story: Cross-cutting (ADR-006 fix)
+- Type: Unit (source code scan)
+- Preconditions: None
+- Steps:
+  1. Read `server/src/db/schema.sql` (or equivalent migration file)
+  2. Assert `clips` table has column `minio_key` (not `r2_key`)
+  3. Assert `audio_tracks` table has column `minio_key`
+  4. Assert no active import of `common.r2_client` in Python workers (should be `minio_client`)
+- Expected: Consistent use of `minio_key` / `minio_client` throughout
+- Priority: P1
 
-### TC-033: r2_key Column Name Consistency (Schema vs Architecture)
+### TC-034: Concurrent Upload Requests Do Not Exceed Clip Limit (Race Safety)
+- Story: STORY-002, STORY-003
+- Type: Integration (real DB)
+- Preconditions: Session at 9 clips
+- Steps:
+  1. Fire 3 concurrent POST `/sessions/:id/clips` requests simultaneously (Promise.all)
+  2. Assert at most 1 succeeds with 202 (10th clip accepted)
+  3. Assert remaining requests return 422 `CLIP_LIMIT_EXCEEDED`
+  4. Assert final clip count in DB is exactly 10
+- Expected: No race condition allows > 10 clips; limit enforced atomically
+- Priority: P1
 
-- **Story:** Cross-cutting (Known Issue C5)
-- **Type:** Unit
-- **Preconditions:** Schema SQL loaded
-- **Steps:**
-  1. Read `server/src/db/schema.sql`
-  2. Assert `clips` table has column `r2_key` (not `minio_key`)
-  3. Assert `audio_tracks` table has column `r2_key` (not `minio_key`)
-  4. Assert all SQL queries in route and worker files reference `r2_key`
-- **Expected:** Schema and application code consistently use `r2_key`
-- **Priority:** P1
-- **Note:** The architecture doc uses `minio_key`; the schema uses `r2_key`. This is a documentation inconsistency, not a code bug, but tests should use the actual column name.
+### TC-035: Duplicate Content Hash Returns 409 with existing_clip_id
+- Story: STORY-002
+- Type: Integration (real MinIO + DB)
+- Preconditions: Session with 1 existing valid clip
+- Steps:
+  1. Upload the same `fixtures/tiny.mp4` file a second time
+  2. Assert HTTP 409 with `error.code == 'DUPLICATE_CONTENT'`
+  3. Assert response body includes `existing_clip_id`
+- Expected: 409 with existing clip ID
+- Priority: P1
 
-### TC-034: Duplicate Tab Session Takeover API Call
+### TC-036: Network Interrupt Mid-Upload — Failed Clip Marked, Others Continue
+- Story: STORY-002
+- Type: Integration (simulated)
+- Preconditions: Active session
+- Steps:
+  1. Begin upload of two clips concurrently
+  2. Abort the first request mid-stream (simulate via `AbortController`)
+  3. Assert first clip is marked with error state (not left as `'uploading'` indefinitely)
+  4. Assert second clip upload completes normally with 202
+  5. Assert API remains healthy (GET `/health` → 200)
+- Expected: Failed upload does not block others; no indefinite 'uploading' state
+- Priority: P1
 
-- **Story:** STORY-018
-- **Type:** Integration
-- **Preconditions:** Active session
-- **Steps:**
-  1. POST `/sessions/:id/tab-takeover` with valid token
-  2. Verify `last_activity_at` is updated in DB
-- **Expected:** 200; `last_activity_at` touched
-- **Priority:** P1
+### TC-037: Person Detection — N Persons Detected Correctly
+- Story: STORY-007, STORY-008
+- Type: Unit (mocked InsightFace with N faces)
+- Preconditions: Mocked InsightFace returning 3 distinct face detections
+- Steps:
+  1. Mock `_get_insight_app().get()` to return 3 face objects with distinct embeddings
+  2. Call `detect_faces_in_frame(frame)` — assert 3 results returned
+  3. Run clustering across 3 frames with same 3 faces — assert 3 distinct `person_ref_id`s
+- Expected: N distinct persons tracked correctly; each has unique ref_id
+- Priority: P1
 
-### TC-035: Concurrent Upload Requests Do Not Exceed Clip Limit
+### TC-038: Person Detection — Partial Frame / Occlusion Handled
+- Story: STORY-007
+- Type: Unit (mocked InsightFace)
+- Preconditions: None
+- Steps:
+  1. Mock InsightFace to return faces with `det_score < MIN_FACE_CONFIDENCE` (occluded/partial)
+  2. Call `detect_faces_in_frame(frame)`
+  3. Assert low-confidence faces are filtered (returned list is empty)
+  4. Assert no exception raised
+- Expected: Low-confidence faces filtered; no crash
+- Priority: P1
 
-- **Story:** STORY-002, STORY-003
-- **Type:** Integration
-- **Preconditions:** Session at 9 clips
-- **Steps:**
-  1. Fire 3 concurrent POST `/sessions/:id/clips` requests simultaneously
-  2. Verify at most 1 succeeds (10th clip accepted); others return 422 `CLIP_LIMIT_EXCEEDED`
-- **Expected:** No race condition; limit enforced atomically
-- **Priority:** P1
+### TC-039: Person Detection Job Failure — Clip Marked 'failed', Others Continue
+- Story: STORY-007
+- Type: Integration (mocked Python worker)
+- Preconditions: Session with 2 clips pending detection
+- Steps:
+  1. Configure Python worker to return HTTP 500 for clip-1's detection
+  2. Run detection jobs
+  3. Assert clip-1's `detection_status='failed'`
+  4. Assert clip-2's detection proceeds independently and completes
+  5. Assert session is not blocked from proceeding to generation
+- Expected: Failed clip marked 'failed'; other clips unaffected; session usable
+- Priority: P0
+
+### TC-040: Audio Analysis Job Failure — User Notified via SSE
+- Story: STORY-006
+- Type: Integration (mocked Python worker)
+- Preconditions: Session with uploaded audio
+- Steps:
+  1. Configure Python worker to return HTTP 422 for `/analyse-audio`
+  2. Trigger audio analysis job
+  3. Assert `audio_tracks.analysis_status='failed'` in DB
+  4. Assert `audio-analysis-failed` SSE event published to Redis
+- Expected: Analysis failure recorded; SSE event published; audio_id in event payload
+- Priority: P0
+
+### TC-041: Generation Happy Path — Valid EDL, Presigned URL Returned
+- Story: STORY-013, STORY-014
+- Type: Unit (mocked assembly + MinIO)
+- Preconditions: AssemblyRequest with 1 clip, 1 highlight, 10s song
+- Steps:
+  1. Build `AssemblyRequest` with valid inputs
+  2. Call `build_edl(request)` — assert non-empty EDL
+  3. Mock FFmpeg trim, concat, encode steps to produce a valid output path
+  4. Mock MinIO `upload_file` to succeed
+  5. Assert `AssembleReelResponse` has non-empty `output_r2_key` and `output_size_bytes > 0`
+- Expected: EDL produced; output key set; response valid
+- Priority: P0
+
+### TC-042: All-Highlights Generation — Only Highlight Segments in EDL
+- Story: STORY-011, STORY-013
+- Type: Unit (pure function)
+- Preconditions: Highlights span entire clip; song duration equals total highlight duration
+- Steps:
+  1. Build request where all clip content is highlighted and song_duration_ms equals highlight total
+  2. Call `build_edl(request)`
+  3. Assert all segments have `source='highlight'`
+  4. Assert `edl.target_duration_ms == song_duration_ms`
+- Expected: EDL contains only highlight segments; no filler
+- Priority: P1
+
+### TC-043: Total Highlights > Song Duration — EDL Truncated, No Error
+- Story: STORY-011
+- Type: Unit (pure function)
+- Preconditions: None
+- Steps:
+  1. Build request with 3×5s highlights but song_duration_ms=8000
+  2. Call `build_edl(request)` — assert no exception
+  3. Assert `edl.target_duration_ms <= 8000`
+  4. Assert all segments have non-negative duration
+- Expected: EDL truncated to fit song; no exception; `target_duration_ms <= song`
+- Priority: P0
+
+### TC-044: Single-Clip Single-Person Happy Path
+- Story: STORY-007, STORY-008, STORY-013
+- Type: Unit (pure function)
+- Preconditions: None
+- Steps:
+  1. Build `AssemblyRequest` with 1 clip, 1 PersonAppearance, no highlights
+  2. Call `build_edl(request)`
+  3. Assert at least one segment has `source='person'`
+  4. Assert `edl.target_duration_ms <= song_duration_ms`
+- Expected: Person appearance appears in EDL; song length respected
+- Priority: P1
+
+### TC-045: Song Under 10s — Generation Does Not Error
+- Story: STORY-013
+- Type: Unit (pure function)
+- Preconditions: None
+- Steps:
+  1. Build request with `song_duration_ms=5000` (5 seconds) and `beats_ms=[0,500,1000,1500,2000,2500,3000,3500,4000,4500]`
+  2. Call `build_edl(request)` — assert no exception
+  3. Assert `isinstance(edl, EDL)` and `len(edl.segments) > 0`
+- Expected: Short song handled gracefully; valid EDL produced
+- Priority: P1
+
+### TC-046: Download — Valid File Returned via Presigned URL
+- Story: STORY-015
+- Type: Integration (real MinIO)
+- Preconditions: Session `status='complete'`; generated MP4 uploaded to MinIO
+- Steps:
+  1. GET `/sessions/:id/reel` with `Accept: application/json`
+  2. Assert 200 with `download_url`
+  3. Issue GET against `download_url` — assert HTTP 200
+  4. Assert response Content-Type is `video/mp4`
+  5. Assert response body is non-empty (bytes > 0)
+- Expected: Valid presigned URL; 200 from MinIO; non-empty MP4 body
+- Priority: P0
+
+### TC-047: Signed URL Returns 404 or 403 on Second Access After TTL
+- Story: STORY-015, STORY-016
+- Type: Integration (real MinIO with shortened TTL)
+- Preconditions: Session complete; presigned URL generated with 5-second TTL (test env)
+- Steps:
+  1. GET `/sessions/:id/reel` → capture `download_url`
+  2. Wait 10 seconds (TTL expired)
+  3. GET `download_url` directly
+  4. Assert HTTP 403 (expired signature) or 404 (object deleted)
+- Expected: Expired URL returns 403 or 404
+- Priority: P1
+
+### TC-048: Storage Empty After Cleanup
+- Story: STORY-016
+- Type: Integration (real MinIO + DB)
+- Preconditions: Session with uploaded clips, audio, and generated reel in MinIO
+- Steps:
+  1. POST `/sessions/:id/done` (trigger immediate cleanup)
+  2. Wait for cleanup job to complete
+  3. Assert MinIO `uploads/{session_id}/` prefix lists 0 objects
+  4. Assert MinIO `generated/{session_id}/` prefix lists 0 objects
+  5. Assert MinIO `thumbnails/{session_id}/` prefix lists 0 objects
+  6. Assert `sessions` DB row has `status='deleted'`
+- Expected: All MinIO objects deleted; session marked 'deleted'
+- Priority: P0
+
+### TC-049: Concurrent Sessions — No Shared State or Races
+- Story: STORY-001, STORY-002
+- Type: Integration (real DB + MinIO)
+- Preconditions: None
+- Steps:
+  1. Create 3 sessions concurrently (3× POST `/sessions`)
+  2. Upload a clip to each session concurrently
+  3. Assert each session has exactly its own clips (no cross-session contamination)
+  4. Assert no 500 errors in any response
+  5. Delete all 3 sessions
+- Expected: Sessions are fully isolated; no shared state; no errors
+- Priority: P1
 
 ---
 
-## 5. Edge Cases
+## Deployment Test Cases (STORY-022 through STORY-026)
 
-### EC-001: Zero Highlights Selected
+### TC-050: Profile-1-cpu.md Contains No Hardcoded Case/Quorra IPs as Requirements
+- Story: STORY-022, STORY-023
+- Type: Unit (documentation scan)
+- Preconditions: `docs/deployment/profile-1-cpu.md` exists
+- Steps:
+  1. Read `docs/deployment/profile-1-cpu.md`
+  2. Assert `192.168.1.122`, `192.168.1.136`, `192.168.1.137`, `192.168.1.138`, `192.168.1.100` do NOT appear outside of clearly-labelled reference callout blocks (lines containing `> `, `Reference Implementation`, `callout`, or `Example:`)
+  3. Assert the document contains `<HOST_IP>`, `<PLACEHOLDER>`, or `<YOUR_HOST_IP>` as the canonical placeholder for the host address
+- Expected: All IPs appear only in reference callout boxes; `<PLACEHOLDER>` used generically
+- Priority: P0
 
-- Submitting generation with no highlights → EDL uses filler segments only; `source = 'filler'`
-- Covered by `TestNoHighlights` in `test_algorithm.py`
+### TC-051: Profile-2-gpu.md Contains No Hardcoded IPs as Requirements
+- Story: STORY-022, STORY-024
+- Type: Unit (documentation scan)
+- Preconditions: `docs/deployment/profile-2-gpu.md` exists
+- Steps:
+  1. Read `docs/deployment/profile-2-gpu.md`
+  2. Assert Quorra-specific IP (`192.168.1.100`) does NOT appear outside of clearly-labelled reference callout blocks
+  3. Assert the document contains a `<PLACEHOLDER>` or `<HOST_IP>` variable for the deployment host
+  4. Assert the document contains GPU-fallback language: "falls back" or "CPU fallback" (InsightFace graceful degradation)
+- Expected: IPs only in reference callouts; GPU fallback documented
+- Priority: P0
 
-### EC-002: All Highlights Selected (100% of Clip)
+### TC-052: infrastructure.md Has Deprecation Notice for Profile 3
+- Story: STORY-026
+- Type: Unit (documentation scan)
+- Preconditions: `docs/infrastructure.md` exists
+- Steps:
+  1. Read the first 20 lines of `docs/infrastructure.md`
+  2. Assert text contains "DEPRECATED" (case-insensitive) within the first 20 lines
+  3. Assert text contains "Profile 3" within the first 20 lines
+  4. Assert text directs readers to `profile-1-cpu.md` and `profile-2-gpu.md`
+- Expected: Deprecation notice present at top of file; canonical profiles referenced
+- Priority: P0
 
-- Highlight spans entire clip duration → EDL may contain only highlight segments
-- If combined highlight duration equals song duration → generation proceeds without warning
-- If combined highlight duration > song duration → EDL truncated, no error raised
-- Covered by `TestHighlightsExceedSongDuration` in `test_algorithm.py`
+### TC-053: CPU-Only Profile — docker compose up Starts All Services
+- Story: STORY-023, STORY-025
+- Type: Integration (Docker Compose)
+- Preconditions: Docker Engine 24+; `docker-compose.yml` at repo root; `.env` from `.env.example`
+- Steps:
+  1. Copy `.env.example` to `.env`; fill placeholders with test values
+  2. Run `docker compose up -d` — assert exit code 0
+  3. Wait up to 60 seconds for all containers to report healthy
+  4. Run `docker compose ps` — assert all services are `Up (healthy)` or `Up`
+  5. GET `http://localhost:3001/health` — assert HTTP 200 with `{"status":"ok"}`
+  6. GET `http://localhost:8000/health` — assert HTTP 200 with `{"status":"ok","service":"hypereels-python-worker"}`
+  7. Run `docker compose down -v`
+- Expected: All services start healthy within 60 seconds; health endpoints return 200
+- Priority: P0
 
-### EC-003: Single Clip, Single Person
+### TC-054: CPU-Only Profile — InsightFace Worker Starts Without GPU
+- Story: STORY-023
+- Type: Integration (Docker Compose)
+- Preconditions: `docker-compose.yml` CPU-only profile; no GPU on host or GPU passthrough disabled
+- Steps:
+  1. Start stack with `docker compose up -d`
+  2. GET `http://localhost:8000/health` — assert 200
+  3. Check worker container logs: assert line containing "CPUExecutionProvider" or "CPU mode"
+  4. Assert NO log line contains "CUDA" or "GPU detected" as an active mode
+- Expected: Worker starts in CPU-only mode; CUDA not used
+- Priority: P0
 
-- One clip, one person detected → detection completes for single clip; `all_clips_done = true` immediately
-- EDL includes person appearance segments plus filler
+### TC-055: GPU-Enabled Profile — InsightFace Falls Back to CPU When No GPU
+- Story: STORY-024
+- Type: Integration (Docker Compose — simulated no-GPU)
+- Preconditions: `docker-compose.gpu.yml` or GPU-enabled compose file; no NVIDIA runtime on test host
+- Steps:
+  1. Start GPU-enabled stack without NVIDIA runtime (remove `deploy.resources` or run on CPU-only host)
+  2. Assert worker starts without crashing (exit code 0)
+  3. GET `http://localhost:8000/health` — assert 200
+  4. Check worker logs: assert fallback warning "GPU not available — falling back to CPU inference"
+- Expected: Graceful CPU fallback; worker does NOT crash; logs warning
+- Priority: P0
 
-### EC-004: Maximum Clips (10)
+### TC-056: Smoke Test Script Exits 0 When All Services Pass
+- Story: STORY-025
+- Type: Integration (smoke test)
+- Preconditions: Full stack running (from TC-053 or equivalent); `scripts/smoke-test.sh` exists
+- Steps:
+  1. Run `bash scripts/smoke-test.sh <HOST_IP>` against a running stack
+  2. Assert exit code 0
+  3. Assert stdout contains "All systems operational"
+  4. Assert each of the following services is reported as PASS: API /health, Python worker /health, Redis PING, PostgreSQL SELECT 1, MinIO /minio/health/live, MinIO bucket 'hypereels' exists
+- Expected: All 6 checks pass; exit code 0; "All systems operational" in output
+- Priority: P0
 
-- Ten clips each with detection → 10 BullMQ jobs queued; all processed sequentially (concurrency = 1 for InsightFace per ADR-013)
-- Session state correctly accumulates all 10 clips before generation is permitted
+### TC-057: Smoke Test Script Exits Non-Zero and Reports Failed Service
+- Story: STORY-025
+- Type: Integration (smoke test)
+- Preconditions: Stack running but PostgreSQL container stopped
+- Steps:
+  1. Stop the PostgreSQL container: `docker compose stop postgres`
+  2. Run `bash scripts/smoke-test.sh <HOST_IP>`
+  3. Assert exit code non-zero
+  4. Assert stdout contains a human-readable error identifying PostgreSQL as the failed service
+  5. Restart PostgreSQL: `docker compose start postgres`
+- Expected: Non-zero exit; clear error message naming the failed service
+- Priority: P0
 
-### EC-005: Empty Audio Track (Silence)
+### TC-058: Profile 3 (Split-System) Not Promoted Anywhere Active
+- Story: STORY-026
+- Type: Unit (documentation scan)
+- Preconditions: None
+- Steps:
+  1. Read `docs/infrastructure.md` — assert first line or block contains "DEPRECATED"
+  2. Read `docs/user-stories.md` — locate STORY-020; assert it contains "Superseded by STORY-023"
+  3. Search `docs/deployment/profile-1-cpu.md` and `docs/deployment/profile-2-gpu.md` for "Profile 3" — assert no occurrence that presents it as an active deployment path
+  4. Search README.md for any mention of "split-system" as an active path
+- Expected: Profile 3 only exists under deprecation/history notices; no active docs promote it
+- Priority: P0
 
-- All-zero audio → `extract_beats` must not crash; may return BPM = 0 or default BPM
-- `compute_energy_envelope` on silence → returns list of zero-amplitude pairs
-- Covered by `test_silent_audio_does_not_raise` in `test_audio_analysis.py`
+### TC-059: .env Template Has PLACEHOLDER Markers and Password Generation Instructions
+- Story: STORY-025
+- Type: Unit (documentation scan)
+- Preconditions: `.env.example` exists at repo root
+- Steps:
+  1. Read `.env.example`
+  2. Assert every variable that requires a secret value has `<PLACEHOLDER>` or `CHANGE_ME` as its default
+  3. Assert a comment exists explaining how to generate strong passwords (e.g., `openssl rand -base64 32`)
+  4. Assert no real credentials appear in the file
+- Expected: All secrets have placeholder values; password generation instructions present
+- Priority: P0
 
-### EC-006: Very Short Clip (< 1 Second)
+### TC-060: Startup from Restart — Services Auto-Restart
+- Story: STORY-023, STORY-024
+- Type: Integration (Docker Compose)
+- Preconditions: Full stack running
+- Steps:
+  1. Run `docker compose restart` (restart all services)
+  2. Wait up to 60 seconds
+  3. Assert all containers return to healthy state
+  4. GET `http://localhost:3001/health` — assert 200
+  5. Assert no container exited with a non-zero code
+- Expected: All services recover after restart; health endpoints respond
+- Priority: P1
 
-- `sample_frames` on a 500 ms clip at 2 fps → returns 0 or 1 frame; must not crash
-- `detect_faces_in_frame` called 0 or 1 times; empty detection is normal
-- Covered by `TestVeryShortSong` in `test_algorithm.py`
+---
 
-### EC-007: Duplicate Tab Session Takeover
+## 4. Coverage
 
-- See TC-034. BroadcastChannel coordination is frontend-only; backend only updates `last_activity_at`.
-- Manual test required to verify the Tab B warning UI and "Continue in This Tab" action.
+| Story | Title | TC(s) | Status |
+|-------|-------|-------|--------|
+| STORY-001 | Create anonymous session | TC-001, TC-002, TC-003 | Covered |
+| STORY-002 | Upload video clips | TC-005, TC-007, TC-007b, TC-008, TC-034, TC-035, TC-036 | Covered |
+| STORY-003 | Validate clip format/size | TC-006, TC-007, TC-007b | Covered |
+| STORY-004 | View clip list with thumbnails | TC-005 (202+schema) | Partial — clip list schema test needed |
+| STORY-005 | Upload audio track | TC-010 | Covered |
+| STORY-006 | Validate audio + trigger analysis | TC-010, TC-011, TC-040 | Covered |
+| STORY-007 | Trigger person detection | TC-012, TC-013, TC-014, TC-037, TC-038, TC-039 | Covered |
+| STORY-008 | Select person of interest | TC-015, TC-044 | Covered |
+| STORY-009 | Handle no persons detected | TC-016 | Covered |
+| STORY-010 | Mark highlight segments | TC-017, TC-018, TC-019, TC-019b | Covered |
+| STORY-011 | Enforce highlight duration constraints | TC-022, TC-024, TC-042, TC-043 | Covered |
+| STORY-012 | Review and edit highlights | TC-020, TC-021 | Covered |
+| STORY-013 | Submit generation job + progress | TC-020, TC-022, TC-023, TC-024, TC-025, TC-026, TC-031, TC-041, TC-044, TC-045 | Covered |
+| STORY-014 | Display status on tab return | TC-027 | Covered |
+| STORY-015 | Download completed HypeReel | TC-032, TC-046, TC-047 | Covered |
+| STORY-016 | Permanently delete session assets | TC-004, TC-009, TC-028, TC-029, TC-030, TC-048 | Covered |
+| STORY-017 | Global error boundary | Manual E2E | Manual only — no automated test (requires Playwright) |
+| STORY-018 | Prevent simultaneous sessions | TC-049 (API side) | Partial — BroadcastChannel UI is manual-only |
+| STORY-019 | Step navigation indicator | Manual E2E | Manual only — frontend UI, no automated test |
+| STORY-020 | Deploy full stack (Case/Quorra reference) | TC-053, TC-056 | Covered (profile-agnostic tests apply) |
+| STORY-021 | InsightFace CPU monitoring | TC-013, TC-054 | Covered |
+| STORY-022 | Publish hardware requirements for self-hosters | TC-050, TC-051 | Covered |
+| STORY-023 | Deploy CPU-only on single machine | TC-053, TC-054, TC-060, TC-050 | Covered |
+| STORY-024 | Deploy GPU-enabled on single machine | TC-055, TC-051, TC-060 | Covered |
+| STORY-025 | Near-single-command deploy with health-check | TC-056, TC-057, TC-059 | Covered |
+| STORY-026 | Retire Profile 3 and consolidate docs | TC-052, TC-058 | Covered |
 
-### EC-008: Download Twice (Second Attempt After Cleanup)
+---
 
-- First download initiates 5-minute cleanup timer
-- If user attempts second download after cleanup runs → 410 Gone from session auth middleware
-- Covered by TC-030
+## 5. Defects
 
-### EC-009: Upload Interrupted Mid-Stream
+### DEFECT-001: r2_client.py Import Name Mismatch
+- Failing TC: TC-033
+- Story: STORY-002, STORY-006, STORY-007 (all workers)
+- Severity: P0
+- Responsible agent: @ai-ml-engineer
+- Observed: `workers/common/r2_client.py` exists; `person_detection_worker.py` imports `from common.minio_client import ...`; the import fails at runtime with `ModuleNotFoundError: No module named 'common.minio_client'`
+- Expected: File renamed to `workers/common/minio_client.py` OR a re-export shim added; all worker imports use `minio_client`
+- Reproduction steps:
+  1. `cd workers && python -c "from person_detection.person_detection_worker import detect_persons"`
+  2. Observe `ModuleNotFoundError: No module named 'common.minio_client'`
 
-- Browser drops connection mid-upload → Fastify multipart stream ends prematurely
-- MinIO partial object may exist → Cleanup worker must handle idempotently
-- Test: mock stream to throw `ECONNRESET` mid-upload; verify DB row is not left in `'uploading'` state indefinitely
+### DEFECT-002: session_ttl Tag May Not Be Applied at Upload Time
+- Failing TC: TC-009
+- Story: STORY-016
+- Severity: P1
+- Responsible agent: @backend-engineer
+- Observed: Architecture specifies objects must be tagged `session_ttl=true` at upload; code review of `server/src/lib/storage.ts` upload path does not confirm tag is set; MinIO ILM safety-net may not activate for orphaned objects
+- Expected: All objects uploaded to MinIO carry the `session_ttl=true` tag so the 48-hour ILM policy applies
+- Reproduction steps:
+  1. Upload a clip via POST `/sessions/:id/clips`
+  2. Run `mc tag list local/hypereels uploads/{session_id}/{clip_id}.mp4`
+  3. Observe: tag absent
 
-### EC-010: Generation Job Timeout (15 Minutes)
-
-- Python assembly worker takes > 15 minutes → `AbortController` fires → `fetch` throws
-- Assembly worker catches error → sets `generation_jobs.status = 'failed'` → publishes `generation-failed` SSE event
-- Covered partially by TC-026
-
-### EC-011: MinIO Unavailable During Upload
-
-- MinIO S3 client throws → upload route returns 503 or 500
-- Clip DB row not created (or left in `'uploading'` and cleaned up by TTL sweep)
-- Manual test: stop MinIO container, attempt upload
-
-### EC-012: Redis Unavailable
-
-- BullMQ throws connection error on job enqueue → API route returns 503
-- No jobs queued; user sees error and can retry
+### DEFECT-003: GET /sessions/:id/reel Absent from OpenAPI Spec
+- Failing TC: TC-032
+- Story: STORY-015
+- Severity: P2 (spec gap, implementation exists)
+- Responsible agent: @backend-engineer
+- Observed: `GET /sessions/:id/reel` is implemented in `server/src/routes/download.ts` but does not appear in `docs/api-spec.md`
+- Expected: Endpoint documented in OpenAPI spec with correct 200/302/401/404/409/410 responses
+- Reproduction steps:
+  1. Search `docs/api-spec.md` for `/reel` — not found
+  2. Check `server/src/routes/download.ts` — endpoint exists
 
 ---
 
 ## 6. Performance Benchmarks
 
-All benchmarks are measured against the production hardware: Case Proxmox (24 threads @ 2.67 GHz) and Quorra Unraid (CPU-only per ADR-013).
+All benchmarks measured on the profile hardware or CI equivalent.
 
 | Metric | Target | Measurement Method |
 |--------|--------|--------------------|
-| InsightFace CPU inference | < 60 s per clip-minute | Timer wrapping `process_detection_job` for a 1-minute synthetic clip |
-| Audio analysis (librosa) | < 10 s per 3-minute song | Timer wrapping `extract_beats` + `extract_onsets` + `compute_energy_envelope` |
-| Assembly + FFmpeg encode | < 5 min for 60 s output reel | Timer wrapping `_run_assembly` with a 60 s synthetic reel |
-| API p95 response time | < 200 ms for non-file endpoints | Vitest + `performance.now()`; 100 sequential requests |
-| Upload throughput | > 50 MB/s (LAN) | Large file upload timer in integration test |
-| Cleanup latency | < 2 s for session with 10 clips | Timer wrapping `cleanupSession` with mocked fast-delete |
+| InsightFace CPU inference | ≤ 60 s per clip-minute | Timer wrapping `process_detection_job` for a 1-min synthetic clip |
+| Audio analysis (librosa) | ≤ 20 s per 3-min song | Timer wrapping `extract_beats` + `extract_onsets` + `compute_energy_envelope` |
+| Assembly + FFmpeg encode | ≤ 5 min for 60 s output reel | Timer wrapping `_run_assembly` with 60 s synthetic reel |
+| API p95 response time (non-file) | ≤ 200 ms | `performance.now()`, 100 sequential requests |
+| Upload throughput (LAN) | ≥ 50 MB/s | Large file upload timer in integration test |
+| Cleanup latency (10 clips) | ≤ 2 s | Timer wrapping `cleanupSession` with mocked fast-delete |
+| CPU-only docker compose up | ≤ 5 min to healthy | TC-053 docker compose startup timer |
 
 ### Performance Test Locations
 
-- Python benchmarks: `workers/tests/test_performance.py` (to be written in a future sprint)
-- TypeScript benchmarks: `server/tests/performance/api.bench.ts` (Vitest bench mode)
+- Python benchmarks: `workers/tests/test_performance.py` (planned; not in automation scope for this sprint)
+- TypeScript benchmarks: `server/tests/performance/api.bench.ts` (Vitest bench mode; planned)
 
 ---
 
-## 7. Infrastructure / Deployment Tests (STORY-020)
+## 7. Edge Cases
 
-These tests are manual smoke tests run by the DevOps engineer during deployment. Automated equivalents are noted where applicable.
+### EC-001: Zero Highlights Selected
+- Generation with no highlights → EDL uses filler segments only (`source='filler'`)
+- Covered by `TestNoHighlights` in `workers/tests/test_algorithm.py`
 
-| Test | How to Verify | Automated? |
-|------|--------------|-----------|
-| CT 113 API server reachable | `curl http://192.168.1.136:3001/health` → `{"status":"ok"}` | `server/tests/smoke/smoke.test.ts` |
-| PostgreSQL reachable (Quorra Docker) | `psql -h 192.168.1.100 -p 7432 -U hypereels -c 'SELECT 1'` | Part of `/health` endpoint check |
-| CT 114 Redis reachable | `redis-cli -h 192.168.1.137 PING` → `PONG` | `server/tests/smoke/smoke.test.ts` |
-| CT 115 MinIO bucket exists | `mc ls minio/hypereel` → bucket listed | MinIO health check in smoke test |
-| MinIO ILM lifecycle rule active | `mc ilm ls minio/hypereel` → `session-ttl-safety-net` rule listed | Manual |
-| NPM proxy host configured | `curl -I https://hypereels.thesquids.ink/health` → 200 | Manual (requires DNS) |
-| Cloudflare tunnel routing | Access from external network → 200 | Manual (requires external network) |
-| Prometheus scraping API | `curl http://192.168.1.100:9090/api/v1/targets` → `hypereel-api` target `state=up` | Manual |
-| Grafana dashboard visible | Open Grafana → HypeReels dashboard → all panels load | Manual |
-| LXC autostart enabled | Restart Case; verify all 4 LXC containers start automatically | Manual |
-| Docker containers restart policy | Restart Quorra; verify worker containers restart | Manual |
-| Quorra workers reach Redis/MinIO | From Quorra Docker: `redis-cli -h 192.168.1.138 PING` | Manual |
+### EC-002: All Highlights Selected
+- Covered by TC-042 and `TestHighlightsExceedSongDuration` in `test_algorithm.py`
 
----
+### EC-003: Single Clip, Single Person
+- Covered by TC-044; single detection-complete event fires immediately
 
-## 8. Acceptance Criteria Checklist
+### EC-004: Maximum Clips (10) with Detection
+- Ten BullMQ detection jobs queued; BullMQ concurrency=1 for InsightFace (ADR-013)
+- Covered by TC-008 (count enforcement)
 
-| Story | All ACs Testable? | Coverage Status | Notes |
-|-------|-------------------|----------------|-------|
-| STORY-001 | Yes | ⚠️ partial | Session expiry TTL not yet auto-tested; needs scheduled purge unit test |
-| STORY-002 | Yes | ❌ missing | Clip upload integration tests needed |
-| STORY-003 | Yes | ❌ missing | Format/size validation integration tests needed |
-| STORY-004 | Yes | ❌ missing | Clip list schema integration test needed |
-| STORY-005 | Yes | ❌ missing | Audio upload integration test needed |
-| STORY-006 | ✅ | ✅ covered | Audio analysis unit tests present; format validation missing |
-| STORY-007 | Yes | ❌ missing | Detection trigger integration test needed |
-| STORY-008 | Yes | ❌ missing | Person selection integration test needed |
-| STORY-009 | Yes | ❌ missing | Empty detection unit test written in this plan (TC-016) |
-| STORY-010 | Yes | ❌ missing | Highlight PUT integration test needed; DB constraint test needed |
-| STORY-011 | Yes | ✅ covered | Highlight constraint tests in test_algorithm.py |
-| STORY-012 | Yes | ❌ missing | Session lock + read-only integration test needed |
-| STORY-013 | Partial | ❌ missing | SSE integration complex; generation integration needed |
-| STORY-014 | Yes | ⚠️ partial | GET /state partially tested; step restoration UI is manual |
-| STORY-015 | Yes | ❌ missing | Download route integration test + GET /reel (C7) needed |
-| STORY-016 | Yes | ❌ missing | Cleanup unit tests written in this plan (TC-028, TC-029) |
-| STORY-017 | Partial | Manual only | React ErrorBoundary is frontend-only; cannot automate without E2E |
-| STORY-018 | Partial | ⚠️ partial | BroadcastChannel is frontend-only; API side (tab-takeover) needs integration test |
-| STORY-019 | Partial | Manual only | Step indicator UI is frontend-only; no automation without E2E |
-| STORY-020 | Yes | ❌ missing | Smoke test script needed |
-| STORY-021 | Yes | ❌ missing | CPUExecutionProvider unit test written in this plan (TC-013) |
+### EC-005: Empty Audio Track (Silence)
+- Covered by `test_silent_audio_does_not_raise` in `workers/tests/test_audio_analysis.py`
 
----
+### EC-006: Very Short Clip (< 1 Second)
+- `sample_frames` on 500ms clip → 0 or 1 frame; must not crash
+- Covered by `TestVeryShortSong` in `test_algorithm.py`
 
-## 9. Known Issues and Open Defects
+### EC-007: Duplicate Tab Session Takeover
+- BroadcastChannel coordination is frontend-only; backend only updates `last_activity_at`
+- Manual test required for Tab B warning UI
 
-These issues are documented from the Architect gap analysis and must be explicitly tested or noted as limitations.
+### EC-008: Download Twice After Cleanup
+- Covered by TC-047 (second access to expired/deleted URL)
 
-| ID | Issue | Type | Test Coverage |
-|----|-------|------|--------------|
-| C3 | Python workers are HTTP FastAPI endpoints, not direct BullMQ consumers. The Node BullMQ workers call the Python FastAPI via HTTP POST. | Architecture (intentional) | TC-010, TC-012 test the Node→Python HTTP path |
-| C5 | DB schema uses `r2_key`; architecture doc uses `minio_key`. All application code must use `r2_key`. | Schema consistency | TC-033 |
-| C6 | Metrics query in `index.ts` references `status != 'destroyed'` but DB CHECK constraint only allows `'deleted'`. The `destroyed` value never enters the DB (constraint prevents it), but the Prometheus gauge query is always counting correctly since no row has `status = 'destroyed'`. The query is logically equivalent but misleading. | Code quality | TC-004 |
-| C7 | `GET /sessions/:id/reel` exists in the download route implementation but is absent from the OpenAPI spec. | Spec gap | TC-032 |
-| I8 | MinIO ILM `session_ttl=true` tag is specified in the architecture but may not be applied in the current upload code. | Implementation gap | TC-009 flags this |
-| I9 | Cleanup worker calls `cleanupSession` from `server/src/lib/cleanup.ts`; a dedicated `cleanupWorker.ts` BullMQ consumer file may not exist as a module. Tests should target `cleanup.ts` directly. | Implementation gap | TC-028, TC-029 |
-| I10 | Validation worker logic may be co-located in the API server process rather than a separate module. Tests should target the validation behaviour through the POST clip/audio routes. | Implementation gap | TC-005, TC-006, TC-010, TC-011 |
+### EC-009: Upload Interrupted Mid-Stream
+- Covered by TC-036
+
+### EC-010: Generation Job Timeout
+- Covered partially by TC-026 (failure handling path)
+
+### EC-011: MinIO Unavailable During Upload
+- Manual test: stop MinIO container, attempt upload; expect 503 or 500 with descriptive error
+
+### EC-012: Redis Unavailable During Job Enqueue
+- Manual test: stop Redis; expect 503 with `QUEUE_UNAVAILABLE` error
+
+### EC-013: CPU-Only Deployment — InsightFace Buffalo_l Model Download
+- Covered by TC-054 and deployment guide TC-053
+- Both online path (auto-download) and offline path (volume-mount) must be documented
 
 ---
 
-## 10. Handoff
+## 8. Infrastructure / Deployment Tests
 
-### Passing Stories
+| Test | Automated? | TC |
+|------|-----------|-----|
+| CPU-only `docker compose up -d` → all healthy | Yes | TC-053 |
+| CPU-only InsightFace CPU mode confirmed | Yes | TC-054 |
+| GPU profile CPU fallback (no GPU host) | Yes | TC-055 |
+| Smoke test script passes all checks | Yes | TC-056 |
+| Smoke test script reports failed service | Yes | TC-057 |
+| Profile 3 deprecation notice in infrastructure.md | Yes | TC-052 |
+| Profile 1/2 docs use `<PLACEHOLDER>` not hardcoded IPs | Yes | TC-050, TC-051 |
+| .env template has no real credentials | Yes | TC-059 |
+| Stack recovers from restart | Yes | TC-060 |
+| Profile 3 not promoted in any active docs | Yes | TC-058 |
+| NPM proxy host configured | Manual | — |
+| Cloudflare tunnel routing (external network) | Manual | — |
+| Prometheus scraping API (Grafana/Quorra stack) | Manual | — |
+| LXC autostart enabled on Proxmox host | Manual | — |
 
-At the time of this test plan's creation, the following test coverage exists and passes:
+---
 
-- STORY-006 (audio analysis): `workers/tests/test_audio_analysis.py` — full unit coverage of `extract_beats`, `compute_energy_envelope`, `derive_downbeats`, `derive_phrases`
-- STORY-011 (highlight duration): `workers/tests/test_algorithm.py` — full unit coverage of `build_edl` including highlight inclusion, overflow truncation, empty highlights, beat snapping
+## 9. Signoff Criteria
 
-### Open Defects (Failing or Missing Tests)
+### P0 Tests Required to Pass Before @devops-engineer Handoff
 
-| Defect | Linked TC | Status |
-|--------|-----------|--------|
-| No integration tests for clip upload (STORY-002/003) | TC-005, TC-006, TC-007, TC-008 | Missing |
-| No integration tests for audio upload (STORY-005/006) | TC-010, TC-011 | Missing |
-| No integration tests for person detection trigger | TC-012 | Missing |
-| No integration tests for generation lifecycle | TC-020, TC-021, TC-026 | Missing |
-| No unit tests for cleanup.ts | TC-028, TC-029 | Missing (written in this plan) |
-| No unit tests for InsightFace CPU init | TC-013 | Missing (written in this plan) |
-| No unit tests for cosine similarity threshold | TC-015 | Missing (written in this plan) |
-| No unit tests for empty clip detection | TC-016 | Missing (written in this plan) |
-| GET /sessions/:id/reel not in OpenAPI spec (C7) | TC-032 | Spec gap |
-| session_ttl tag not verified on upload (I8) | TC-009 | Implementation gap |
-| 'destroyed' used in metrics query vs 'deleted' in schema (C6) | TC-004 | Code quality gap |
+**Session lifecycle:**
+TC-001, TC-002, TC-003, TC-004
 
-### Coverage Gaps
+**Clip upload and validation:**
+TC-005, TC-006, TC-007, TC-007b, TC-008
 
-1. E2E Playwright tests: no automated E2E exists. Happy-path wizard (STORY-019, full user journey) is manual only.
-2. SSE integration: SSE stream testing requires a real EventSource client in tests. This is technically feasible with `eventsource` npm package but not yet written.
-3. Performance benchmarks: no automated performance test exists. All benchmarks are manual with `time` wrapper.
-4. Infrastructure smoke tests: all infrastructure tests are manual; no automated smoke test script exists yet.
+**Audio upload:**
+TC-010, TC-011
 
-### Signoff Criteria
+**Person detection:**
+TC-012, TC-013, TC-015, TC-016, TC-039, TC-040
 
-When the following P0 test cases pass in CI, this QA sign-off block is satisfied and `@devops-engineer` may proceed:
+**Highlights:**
+TC-017, TC-018, TC-022, TC-024, TC-043
 
-- TC-001, TC-002, TC-003, TC-004 (session lifecycle)
-- TC-005, TC-006, TC-007, TC-008 (clip upload and validation)
-- TC-010, TC-011 (audio upload)
-- TC-013, TC-015, TC-016 (person detection)
-- TC-017, TC-018 (highlights)
-- TC-020, TC-022, TC-024, TC-026 (generation)
-- TC-028, TC-029, TC-030 (cleanup)
+**Generation:**
+TC-020, TC-026, TC-041
 
-When all P0 TCs pass → `@devops-engineer`
+**Cleanup:**
+TC-028, TC-029, TC-030, TC-048
+
+**Download:**
+TC-046
+
+**Deployment (E10):**
+TC-050, TC-051, TC-052, TC-053, TC-054, TC-055, TC-056, TC-057, TC-058, TC-059
+
+---
+
+> Passing stories: STORY-001 (partial), STORY-006 (unit tests), STORY-007 (unit tests), STORY-008 (unit tests), STORY-009 (unit tests), STORY-010 (unit tests), STORY-011 (unit tests), STORY-013 (unit tests), STORY-016 (unit tests), STORY-021 (unit tests), STORY-022 (doc scan), STORY-023 (doc scan), STORY-024 (doc scan), STORY-026 (doc scan).
+> Open defects: DEFECT-001 (P0 — r2_client.py import mismatch blocks all Python workers at runtime), DEFECT-002 (P1 — session_ttl tag not verified on upload), DEFECT-003 (P2 — /reel endpoint missing from OpenAPI spec).
+> Coverage gaps: STORY-004 (clip list schema integration test), STORY-017 (requires Playwright E2E), STORY-018 BroadcastChannel UI (requires Playwright E2E), STORY-019 (requires Playwright E2E).
+> P0s BLOCKED — DEFECT-001 (r2_client.py → minio_client.py rename) must be resolved by @ai-ml-engineer before @devops-engineer handoff.
