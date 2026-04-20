@@ -1,7 +1,8 @@
 /**
  * Generation routes:
  *   POST   /sessions/:id/generate
- *   GET    /sessions/:id/generate/:job_id
+ *   GET    /sessions/:id/generate/:job_id   (canonical)
+ *   GET    /sessions/:id/job/:job_id        (alias — matches mandate endpoint list)
  *   DELETE /sessions/:id/generate/:job_id  (cancel)
  */
 import type { FastifyPluginAsync } from 'fastify';
@@ -42,7 +43,7 @@ const generationRoutes: FastifyPluginAsync = async (fastify) => {
       }
 
       // Validate preconditions
-      const [validClipsRes, audioRes] = await Promise.all([
+      const [validClipsRes, audioRes, pendingDetectionRes] = await Promise.all([
         query<{ count: string }>(
           `SELECT COUNT(*) AS count FROM clips
            WHERE session_id = $1 AND status = 'valid'`,
@@ -51,6 +52,14 @@ const generationRoutes: FastifyPluginAsync = async (fastify) => {
         query<{ analysis_status: string }>(
           `SELECT analysis_status FROM audio_tracks
            WHERE session_id = $1 LIMIT 1`,
+          [session.id],
+        ),
+        // Clips that have status='valid' but person detection is not yet complete
+        query<{ id: string }>(
+          `SELECT id FROM clips
+           WHERE session_id = $1
+             AND status = 'valid'
+             AND detection_status NOT IN ('complete', 'failed')`,
           [session.id],
         ),
       ]);
@@ -65,6 +74,18 @@ const generationRoutes: FastifyPluginAsync = async (fastify) => {
           error: {
             code: 'NO_VALID_CLIPS',
             message: 'At least one valid clip is required to generate a reel.',
+          },
+        });
+      }
+
+      // 409 if person detection is still running for any clip
+      if (pendingDetectionRes.rowCount && pendingDetectionRes.rowCount > 0) {
+        const pendingClips = pendingDetectionRes.rows.map((r) => r.id);
+        return reply.code(409).send({
+          error: {
+            code: 'DETECTION_PENDING',
+            message: 'Person detection has not yet completed for all clips. Please wait.',
+            details: { pending_clips: pendingClips },
           },
         });
       }
@@ -140,21 +161,33 @@ const generationRoutes: FastifyPluginAsync = async (fastify) => {
 
       const job = jobRes.rows[0]!;
 
-      // Attempt to get progress from BullMQ
-      let progress: number | null = null;
-      try {
-        const bullJob = await generationQueue.getJob(job_id);
-        if (bullJob) {
-          const raw = bullJob.progress;
-          progress = typeof raw === 'number' ? raw : null;
+      // Compute progress_pct according to FSM spec:
+      //   queued=0, processing/rendering=1-99 (from BullMQ), complete=100, failed/cancelled=null
+      const dbStatus = (job as { status: string }).status;
+      let progress_pct: number | null = null;
+
+      if (dbStatus === 'complete') {
+        progress_pct = 100;
+      } else if (dbStatus === 'queued') {
+        progress_pct = 0;
+      } else if (dbStatus === 'failed' || dbStatus === 'cancelled') {
+        progress_pct = null; // unchanged per spec (failure carries error_message instead)
+      } else {
+        // processing or rendering — pull live progress from BullMQ
+        try {
+          const bullJob = await generationQueue.getJob(job_id);
+          if (bullJob) {
+            const raw = bullJob.progress;
+            progress_pct = typeof raw === 'number' ? raw : null;
+          }
+        } catch {
+          // Not critical — progress is a convenience field
         }
-      } catch {
-        // Not critical — progress is a convenience field
       }
 
       return reply.send({
         ...job,
-        progress_pct: progress,
+        progress_pct,
       });
     },
   );
@@ -215,6 +248,62 @@ const generationRoutes: FastifyPluginAsync = async (fastify) => {
       });
 
       return reply.code(200).send({ message: 'Generation job cancelled.' });
+    },
+  );
+
+  // ── GET /sessions/:id/job/:job_id (alias) ─────────────────
+  // Alternate path segment matching the mandate endpoint list.
+  // Identical response shape to GET /sessions/:id/generate/:job_id.
+  fastify.get<{ Params: { id: string; job_id: string } }>(
+    '/sessions/:id/job/:job_id',
+    async (request, reply) => {
+      const { session } = request;
+      const { job_id } = request.params;
+
+      const jobRes = await query(
+        `SELECT id, status, output_url, output_duration_ms, output_size_bytes,
+                error_message, started_at, completed_at, created_at
+         FROM generation_jobs
+         WHERE id = $1 AND session_id = $2`,
+        [job_id, session.id],
+      );
+
+      if (jobRes.rowCount === 0) {
+        return reply.code(404).send({
+          error: { code: 'JOB_NOT_FOUND', message: 'Generation job not found.' },
+        });
+      }
+
+      const job = jobRes.rows[0]!;
+
+      // Compute progress_pct according to FSM spec:
+      //   queued=0, processing/rendering=1-99 (from BullMQ), completed=100, failed=unchanged
+      let progress_pct: number | null = null;
+      const dbStatus = (job as { status: string }).status;
+
+      if (dbStatus === 'complete') {
+        progress_pct = 100;
+      } else if (dbStatus === 'queued') {
+        progress_pct = 0;
+      } else if (dbStatus === 'failed' || dbStatus === 'cancelled') {
+        progress_pct = null; // unchanged per spec
+      } else {
+        // processing or rendering — get real progress from BullMQ
+        try {
+          const bullJob = await generationQueue.getJob(job_id);
+          if (bullJob) {
+            const raw = bullJob.progress;
+            progress_pct = typeof raw === 'number' ? raw : null;
+          }
+        } catch {
+          // Not critical
+        }
+      }
+
+      return reply.send({
+        ...job,
+        progress_pct,
+      });
     },
   );
 };

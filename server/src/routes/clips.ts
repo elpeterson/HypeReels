@@ -63,6 +63,25 @@ const clipsRoutes: FastifyPluginAsync = async (fastify) => {
       const ext = path.extname(data.filename).toLowerCase();
       const mime = data.mimetype;
 
+      // Check for duplicate clip (same original filename already uploaded to this session)
+      const dupeRes = await query<{ id: string }>(
+        `SELECT id FROM clips
+         WHERE session_id = $1 AND original_filename = $2 AND status != 'invalid'
+         LIMIT 1`,
+        [session.id, data.filename],
+      );
+      if (dupeRes.rowCount && dupeRes.rowCount > 0) {
+        // Drain the upload stream before returning
+        data.file.resume();
+        return reply.code(409).send({
+          error: {
+            code: 'DUPLICATE_CLIP',
+            message: `A clip with filename "${data.filename}" already exists in this session.`,
+            details: { existing_clip_id: dupeRes.rows[0]!.id },
+          },
+        });
+      }
+
       if (!ALLOWED_VIDEO_EXT.has(ext) || !ALLOWED_VIDEO_MIME.has(mime)) {
         // Drain the stream to avoid memory leak
         data.file.resume();
