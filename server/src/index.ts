@@ -12,6 +12,7 @@
  *  8. Listen
  *  9. Wire SIGTERM/SIGINT for graceful shutdown
  */
+import { fileURLToPath } from 'url';
 import Fastify, { type FastifyRequest, type FastifyReply } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -44,14 +45,6 @@ import { startAssemblyWorker } from './workers/assemblyWorker.js';
 import { startCleanupWorker } from './workers/cleanupWorker.js';
 import { startValidationWorker } from './workers/validationWorker.js';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function requireEnv(name: string): string {
-  const val = process.env[name];
-  if (!val) throw new Error(`Missing required environment variable: ${name}`);
-  return val;
-}
-
 // ─── Prometheus metrics setup ─────────────────────────────────────────────────
 
 // Enable default Node.js runtime metrics (event loop lag, GC, heap, etc.)
@@ -76,7 +69,8 @@ const bullmqJobsTotal = new promClient.Counter({
   labelNames: ['queue', 'status'] as const,
 });
 
-const activeSessionsTotal = new promClient.Gauge({
+// Gauge self-registers with prom-client on construction; no reference needed.
+new promClient.Gauge({
   name: 'active_sessions_total',
   help: 'Number of active (non-deleted, non-complete) sessions in the database',
   async collect() {
@@ -358,7 +352,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('Fatal startup error:', err);
-  process.exit(1);
-});
+// Only auto-start when this file is the process entry point.
+// Guards against process.exit() being called when tests import buildApp.
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error('Fatal startup error:', err);
+    process.exit(1);
+  });
+}

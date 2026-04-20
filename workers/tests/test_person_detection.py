@@ -24,8 +24,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -536,7 +535,6 @@ class TestResponseSchema:
             PersonTrack,
             FaceDetection,
             BoundingBox,
-            FRAME_SAMPLE_INTERVAL_SEC,
         )
 
         bb = BoundingBox(left=0.1, top=0.1, width=0.2, height=0.3)

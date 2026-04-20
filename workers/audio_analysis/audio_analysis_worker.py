@@ -22,11 +22,8 @@ For each audio job:
 
 from __future__ import annotations
 
-import io
 import json
-import math
 import os
-import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -35,10 +32,10 @@ import librosa
 import numpy as np
 from dotenv import load_dotenv
 
-from common.db import execute, fetchone
+from common.db import execute
 from common.logger import get_logger
 from common.r2_client import download_to_tmp, generate_presigned_url, upload_bytes
-from common.redis_client import fail_job, fetch_next_job, job_context, publish_event
+from common.redis_client import fetch_next_job, job_context, publish_event
 
 load_dotenv()
 log = get_logger(__name__)
@@ -115,7 +112,8 @@ def extract_beats(y: np.ndarray, sr: float) -> tuple[float, np.ndarray]:
         # Try madmom fallback
         try:
             from madmom.features.beats import RNNBeatProcessor, BeatTrackingProcessor
-            import tempfile, soundfile as sf
+            import tempfile
+            import soundfile as sf
 
             # madmom requires a file path; write a temp wav
             fd, tmp_wav = tempfile.mkstemp(suffix=".wav", dir="/tmp/hypereels")

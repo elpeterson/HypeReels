@@ -1,0 +1,12 @@
+# Prometheus configuration — production (Profile 1 CPU / Profile 2 GPU)
+# Scrapes the HypeReels API /metrics endpoint.
+# Used by docker/docker-compose.cpu.yml and docker/docker-compose.gpu.yml.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: "hypereels-api"
+    static_configs:
+      - targets: ["api:3001"]
+    metrics_path: "/metrics"

@@ -114,7 +114,7 @@ function makeSessionRow(overrides: Partial<Record<string, unknown>> = {}) {
 
 /** Configure query mock to handle session auth middleware + route queries. */
 function mockSessionLookup(sessionRow: ReturnType<typeof makeSessionRow> | null) {
-  vi.mocked(query).mockImplementation(async (sql: string, params?: unknown[]) => {
+  vi.mocked(query).mockImplementation(async (sql: string, _params?: unknown[]) => {
     // Session auth middleware looks up by token
     if (sql.includes('WHERE token = $1')) {
       if (sessionRow === null) {

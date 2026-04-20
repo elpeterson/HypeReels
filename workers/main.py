@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import threading as _threading
 from pathlib import Path
 from typing import Any
 
@@ -204,7 +205,6 @@ async def assemble_reel(body: AssembleReelRequest) -> AssembleReelResponse:
 
 def _run_assembly(body: AssembleReelRequest) -> AssembleReelResponse:
     """Run the full assembly pipeline and return the result."""
-    import json
     import shutil
     import uuid as _uuid
     from pathlib import Path as _Path
@@ -231,7 +231,7 @@ def _run_assembly(body: AssembleReelRequest) -> AssembleReelResponse:
     # ── Override R2 credentials if passed by Node ─────────────────────────────
     _configure_r2_from_request(body)
 
-    from common.r2_client import download_to_tmp, upload_file, generate_presigned_url
+    from common.r2_client import download_to_tmp, upload_file
 
     analysis = body.audio_analysis
     audio_duration_ms = int(analysis.get("duration_ms", 0))
@@ -426,8 +426,6 @@ async def detect_persons_endpoint(body: DetectPersonsRequest) -> DetectPersonsRe
 #
 # The cache is process-local only — ephemeral by design.  Session cleanup (TTL)
 # resets are handled by the cleanup worker, not here.
-import threading as _threading
-
 _session_embeddings_lock = _threading.Lock()
 _session_embeddings_cache: dict[str, list[dict]] = {}
 

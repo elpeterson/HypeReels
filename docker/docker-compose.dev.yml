@@ -1,0 +1,218 @@
+# HypeReels — Local Development Stack
+#
+# Starts all services needed for local development:
+#   - PostgreSQL 16
+#   - Redis 7
+#   - MinIO (S3-compatible object storage) with bucket auto-created on startup
+#   - Python workers (FastAPI / uvicorn)
+#   - Node.js API (Fastify, hot-reload via tsx watch)
+#   - Prometheus (scrapes /metrics from the API)
+#
+# Usage:
+#   docker compose -f docker/docker-compose.dev.yml up
+#   docker compose -f docker/docker-compose.dev.yml down -v   # destroy volumes too
+#
+# All credentials here are for LOCAL DEV ONLY. Do NOT use these values in production.
+
+# ─── Shared environment ────────────────────────────────────────────────────────
+x-env-common: &env-common
+  DATABASE_URL: "postgresql://hypereels:hypereels@postgres:5432/hypereels?sslmode=disable"
+  DATABASE_SSL: "false"
+  REDIS_URL: "redis://redis:6379"
+  REDIS_PASSWORD: ""
+  MINIO_ENDPOINT: "http://minio:9000"
+  MINIO_ACCESS_KEY_ID: "minioadmin"
+  MINIO_SECRET_ACCESS_KEY: "minioadmin"
+  MINIO_BUCKET: "hypereels"
+  MINIO_PUBLIC_URL: "http://localhost:9000/hypereels"
+  # Legacy R2_* aliases — kept for code that still references them
+  R2_ENDPOINT_URL: "http://minio:9000"
+  R2_ACCESS_KEY_ID: "minioadmin"
+  R2_SECRET_ACCESS_KEY: "minioadmin"
+  R2_BUCKET_NAME: "hypereels"
+  R2_PUBLIC_URL: "http://localhost:9000/hypereels"
+  PYTHON_WORKER_URL: "http://python-workers:8000"
+  SESSION_TTL_HOURS: "24"
+  SESSION_TTL_SECONDS: "86400"
+  CLEANUP_GRACE_PERIOD_MINUTES: "5"
+  NODE_ENV: "development"
+  LOG_LEVEL: "info"
+  CORS_ORIGIN: "http://localhost:5173"
+  METRICS_PATH: "/metrics"
+  MAX_CLIP_SIZE_BYTES: "500000000"
+  MAX_CLIPS_PER_SESSION: "10"
+  MAX_CLIP_DURATION_MS: "300000"
+  MAX_AUDIO_DURATION_MS: "600000"
+  GENERATION_TIMEOUT_MS: "900000"
+  INSIGHTFACE_MODEL: "buffalo_l"
+  INSIGHTFACE_PROVIDERS: "CPUExecutionProvider"
+  INSIGHTFACE_COSINE_THRESHOLD: "0.45"
+  FFMPEG_CRF: "20"
+  FFMPEG_PRESET: "fast"
+  FFMPEG_MAX_WIDTH: "1920"
+
+services:
+
+  # ─── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hypereels
+      POSTGRES_PASSWORD: hypereels
+      POSTGRES_DB: hypereels
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../server/src/db/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hypereels -d hypereels"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ─── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── MinIO ──────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"  # S3-compatible API
+      - "9001:9001"  # MinIO Console UI
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # MinIO bucket initialiser — runs once, creates bucket + 48h lifecycle rule
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 minioadmin minioadmin &&
+        mc mb --ignore-existing local/hypereels &&
+        mc anonymous set download local/hypereels &&
+        mc ilm rule add local/hypereels --expire-days 2 --tags 'session_ttl=true' || true &&
+        echo 'MinIO bucket hypereels ready (48h ILM rule applied).'
+      "
+    restart: "no"
+
+  # ─── Python workers ──────────────────────────────────────────────────────────
+  python-workers:
+    build:
+      context: ../workers
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      <<: *env-common
+      PORT: "8000"
+      FFMPEG_PATH: "/usr/bin/ffmpeg"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../workers:/app:ro
+      - worker_tmp:/tmp/hypereels
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─── Node.js API ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+      target: dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      python-workers:
+        condition: service_healthy
+    environment:
+      <<: *env-common
+      PORT: "3001"
+      HOST: "0.0.0.0"
+      VITE_API_URL: ""
+      CLIENT_DIST_PATH: ""
+    ports:
+      - "3001:3001"
+    volumes:
+      - ../server/src:/app/src:ro
+      - ../server/package.json:/app/package.json:ro
+      - ../server/tsconfig.json:/app/tsconfig.json:ro
+      - api_node_modules:/app/node_modules
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ─── Prometheus ──────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../docker/prometheus-dev.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  api_node_modules:
+  worker_tmp:
+  prometheus_data:

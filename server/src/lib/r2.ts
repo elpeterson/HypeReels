@@ -35,7 +35,7 @@ export const BUCKET = requireEnv('R2_BUCKET');
 
 export interface UploadStreamOptions {
   key: string;
-  body: PutObjectCommandInput['Body'];
+  body: Exclude<PutObjectCommandInput['Body'], undefined>;
   contentType: string;
   contentLength?: number;
 }

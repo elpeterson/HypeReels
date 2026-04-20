@@ -10,16 +10,13 @@ bypassing download/DB/Redis logic entirely.
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
-import pytest
 
 # ── Import the functions under test ───────────────────────────────────────────
 # These imports must succeed without any env vars or DB connections.
 from audio_analysis.audio_analysis_worker import (
     TARGET_SR,
-    HOP_LENGTH,
     compute_energy_envelope,
     derive_downbeats,
     derive_phrases,
@@ -146,7 +143,7 @@ class TestExtractBeats:
             if 90.0 <= bpm <= 160.0:
                 hits += 1
         # At least 2 out of 3 runs should land in the right octave
-        assert hits >= 2, f"120 BPM click track detected with unexpected BPM across runs"
+        assert hits >= 2, "120 BPM click track detected with unexpected BPM across runs"
 
 
 # ── beats_ms list contract ────────────────────────────────────────────────────
@@ -389,10 +386,16 @@ class TestDerivePhrases:
         """A very loud second half should be marked as 'chorus' (above 75th percentile)."""
         sr = TARGET_SR
         duration_sec = 32.0
-        # Build a pattern where the second half is significantly louder
-        quiet = np.zeros(int(sr * duration_sec * 0.6), dtype=np.float32)
-        loud = np.ones(int(sr * duration_sec * 0.4), dtype=np.float32) * 1.0
-        y = np.concatenate([quiet, loud])
+        # Build a pattern where the MIDDLE two phrases are loud and the
+        # first/last are quiet (intro/outro).  With 4 phrases of 8 s each:
+        #   phrase 0 (0-8 s):   quiet → intro
+        #   phrase 1 (8-16 s):  loud  → chorus
+        #   phrase 2 (16-24 s): loud  → chorus
+        #   phrase 3 (24-32 s): quiet → outro
+        quiet1 = np.zeros(int(sr * duration_sec * 0.25), dtype=np.float32)
+        loud = np.ones(int(sr * duration_sec * 0.50), dtype=np.float32) * 1.0
+        quiet2 = np.zeros(int(sr * duration_sec * 0.25), dtype=np.float32)
+        y = np.concatenate([quiet1, loud, quiet2])
         env = compute_energy_envelope(y, float(sr))
 
         beat_times = np.arange(64) * (60.0 / 120.0)

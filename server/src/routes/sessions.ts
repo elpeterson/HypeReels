@@ -100,15 +100,11 @@ const sessionsRoutes: FastifyPluginAsync = async (fastify) => {
       const cleanup = await addSSEConnection(session.id, reply);
 
       request.raw.on('close', () => {
-        cleanup().catch((err) =>
-          request.log.error({ err }, 'SSE cleanup error'),
-        );
+        cleanup();
       });
 
       request.raw.on('error', () => {
-        cleanup().catch((err) =>
-          request.log.error({ err }, 'SSE cleanup error'),
-        );
+        cleanup();
       });
     },
   );

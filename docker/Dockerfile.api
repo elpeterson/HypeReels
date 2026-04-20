@@ -1,0 +1,54 @@
+# HypeReels API — Multi-stage Dockerfile
+#
+# Stages:
+#   base   — shared Node.js base with all dependencies
+#   dev    — hot-reload with tsx watch (used by docker-compose.dev.yml)
+#   build  — compiles TypeScript → dist/
+#   prod   — minimal production image (node dist/index.js)
+#
+# Build context must be the REPO ROOT so both server/ and workers/ are reachable.
+# docker buildx build -f docker/Dockerfile.api --target prod -t hypereels-api:sha .
+
+FROM node:20-alpine AS base
+WORKDIR /app
+
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --frozen-lockfile
+
+# ─── Development (hot-reload) ─────────────────────────────────────────────────
+FROM base AS dev
+ENV NODE_ENV=development
+COPY server/tsconfig.json ./
+COPY server/src ./src
+EXPOSE 3001
+CMD ["npx", "tsx", "watch", "src/index.ts"]
+
+# ─── Build (TypeScript → dist/) ───────────────────────────────────────────────
+FROM base AS build
+COPY server/tsconfig.json ./
+COPY server/src ./src
+RUN npm run build
+
+# ─── Production ───────────────────────────────────────────────────────────────
+FROM node:20-alpine AS prod
+WORKDIR /app
+ENV NODE_ENV=production
+
+# Install curl for healthcheck
+RUN apk add --no-cache curl
+
+COPY server/package.json server/package-lock.json ./
+RUN npm ci --frozen-lockfile --omit=dev && npm cache clean --force
+
+# Copy compiled output
+COPY --from=build /app/dist ./dist
+
+# SPA is mounted at runtime via Docker volume:
+#   -v ./server/client-dist:/app/client-dist:ro
+# The API reads CLIENT_DIST_PATH (defaults to /app/client-dist if unset).
+
+EXPOSE 3001
+CMD ["node", "dist/index.js"]

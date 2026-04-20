@@ -22,7 +22,7 @@
  * Or:       cd server && npx vitest run src/workers/cleanupWorker.test.ts
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ── Module mocks ──────────────────────────────────────────────────────────────
 
