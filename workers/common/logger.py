@@ -26,7 +26,10 @@ def _configure_once() -> None:
         ],
         wrapper_class=structlog.make_filtering_bound_logger(logging.DEBUG),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        # Use stdlib LoggerFactory so each logger has a .name attribute,
+        # which is required by the stdlib.add_logger_name processor above.
+        # Output is still directed to stdout via logging.basicConfig below.
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
