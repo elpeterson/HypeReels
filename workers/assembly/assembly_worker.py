@@ -320,6 +320,8 @@ def process_generation_job(job_data: dict[str, Any]) -> None:
     # Create job-specific tmp directory
     job_tmp = TMP_DIR / job_id
     job_tmp.mkdir(parents=True, exist_ok=True)
+    audio_local: Path | None = None       # declared before try so finally block can always reference it
+    clip_local_paths: dict[str, Path] = {}  # declared before try so finally block can always reference it
 
     try:
         # 1. Load session data
@@ -346,7 +348,6 @@ def process_generation_job(job_data: dict[str, Any]) -> None:
         )
 
         # 3. Download all unique clips needed
-        clip_local_paths: dict[str, Path] = {}
         for seg in edl.segments:
             if seg.clip_id not in clip_local_paths:
                 local = download_to_tmp(seg.clip_r2_key, suffix=".mp4")
@@ -453,8 +454,8 @@ def process_generation_job(job_data: dict[str, Any]) -> None:
         shutil.rmtree(job_tmp, ignore_errors=True)
         for p in clip_local_paths.values():
             p.unlink(missing_ok=True)
-        if "audio_local" in dir():
-            audio_local.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
+        if audio_local is not None:
+            audio_local.unlink(missing_ok=True)
 
 
 # ── Public importable function (used by FastAPI main.py) ─────────────────────
@@ -492,9 +493,10 @@ def assemble_reel(request: AssemblyRequest) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
     job_tmp = TMP_DIR / job_id
     job_tmp.mkdir(parents=True, exist_ok=True)
+    clip_local_paths: dict[str, Path] = {}
+    audio_local: Path | None = None
 
     try:
-        clip_local_paths: dict[str, Path] = {}
         for seg in edl.segments:
             if seg.clip_id not in clip_local_paths:
                 local = download_to_tmp(seg.clip_r2_key, suffix=".mp4")
@@ -536,10 +538,8 @@ def assemble_reel(request: AssemblyRequest) -> dict[str, Any]:
         shutil.rmtree(job_tmp, ignore_errors=True)
         for p in clip_local_paths.values():
             p.unlink(missing_ok=True)
-        try:
-            audio_local.unlink(missing_ok=True)  # type: ignore[possibly-undefined]
-        except Exception:
-            pass
+        if audio_local is not None:
+            audio_local.unlink(missing_ok=True)
 
 
 # ── Worker loop ───────────────────────────────────────────────────────────────
