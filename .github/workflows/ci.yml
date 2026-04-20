@@ -64,7 +64,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint
 
-    # Real service containers — NOT mocked
+    # Real service containers — NOT mocked.
+    # MinIO is started via a step (not a service) because service containers
+    # cannot override CMD, which MinIO requires (`server /data`).
     services:
       postgres:
         image: postgres:16-alpine
@@ -90,24 +92,24 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
-      minio:
-        image: minio/minio:latest
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        ports:
-          - 9000:9000
-        options: >-
-          --health-cmd "curl -sf http://localhost:9000/minio/health/live"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        # MinIO needs the server command; use env var trick supported by GitHub
-        # Actions' Docker service syntax — starts with default entrypoint
-        # NOTE: service containers can't override CMD, so MinIO will use its
-        # default standalone mode which starts on :9000 automatically.
-
     steps:
+      # MinIO cannot be a service container: GitHub Actions service containers
+      # don't support overriding CMD, and MinIO requires `server /data` to start.
+      # We start it explicitly as a background Docker container instead.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data
+          # Wait until the health endpoint responds (up to 30 s)
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:9000/minio/health/live; then
+              echo "MinIO ready"; break
+            fi
+            sleep 2
+          done
       - uses: actions/checkout@v4
 
       - name: Set up Node.js
