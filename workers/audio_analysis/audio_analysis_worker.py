@@ -85,12 +85,63 @@ def load_audio(path: Path) -> tuple[np.ndarray, float]:
 
 
 def extract_beats(y: np.ndarray, sr: float) -> tuple[float, np.ndarray]:
-    """Return (bpm, beat_times_seconds)."""
+    """Return (bpm, beat_times_seconds).
+
+    Fallback chain (NEVER raises):
+      1. librosa.beat.beat_track(trim=False) — primary path.
+      2. If < 4 beats returned, attempt madmom RNNBeatProcessor.
+      3. If madmom unavailable or also returns < 4 beats, synthesise
+         beats at the detected BPM using a fixed interval (60.0 / bpm).
+    """
+    duration_sec = float(len(y)) / sr
+
     tempo, beat_frames = librosa.beat.beat_track(
         y=y, sr=sr, hop_length=HOP_LENGTH, trim=False
     )
     bpm = float(tempo) if np.isscalar(tempo) else float(tempo[0])
+    if bpm <= 0:
+        bpm = 120.0
     beat_times = librosa.frames_to_time(beat_frames, sr=sr, hop_length=HOP_LENGTH)
+
+    if len(beat_times) < 4:
+        log.warning(
+            "beat_track_low_count",
+            librosa_beats=len(beat_times),
+            bpm=bpm,
+        )
+        # Try madmom fallback
+        try:
+            from madmom.features.beats import RNNBeatProcessor, BeatTrackingProcessor
+            import tempfile, soundfile as sf
+
+            # madmom requires a file path; write a temp wav
+            fd, tmp_wav = tempfile.mkstemp(suffix=".wav", dir="/tmp/hypereels")
+            os.close(fd)
+            try:
+                sf.write(tmp_wav, y, int(sr))
+                proc = RNNBeatProcessor()
+                tracker = BeatTrackingProcessor(fps=100)
+                beat_times_madmom = tracker(proc(tmp_wav))
+                if len(beat_times_madmom) >= 4:
+                    log.info("beat_track_madmom_success", beats=len(beat_times_madmom))
+                    return bpm, np.array(beat_times_madmom, dtype=np.float64)
+            finally:
+                try:
+                    os.unlink(tmp_wav)
+                except OSError:
+                    pass
+        except Exception as exc:
+            log.warning("madmom_fallback_failed", error=str(exc))
+
+        # Fixed-interval fallback: synthesise beats at detected BPM
+        interval_sec = 60.0 / bpm
+        beat_times = np.arange(0.0, duration_sec, interval_sec)
+        log.info(
+            "beat_track_fixed_interval_fallback",
+            bpm=bpm,
+            synthesised_beats=len(beat_times),
+        )
+
     return bpm, beat_times
 
 
