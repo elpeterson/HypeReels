@@ -9,7 +9,7 @@
  *    - DELETE /sessions/:id                 (immediate, start-over)
  *    - The repeatable stale-session scanner (ttl-expired)
  *
- * 2. REPEATABLE SCAN: Runs every 60 minutes (cron: '0 * * * *').
+ * 2. REPEATABLE SCAN: Runs every 60 minutes (pattern: '0 * * * *').
  *    Queries PostgreSQL for stale sessions:
  *      a. status='complete' and completed_at > 24 hours ago (post-download cleanup)
  *      b. status='active'|'locked' and created_at > 48 hours ago (abandoned sessions)
@@ -205,7 +205,7 @@ export function startCleanupWorker(): {
       'scan-stale-sessions',
       {},
       {
-        repeat: { cron: '0 * * * *' }, // every hour at :00
+        repeat: { pattern: '0 * * * *' }, // every hour at :00
         jobId: 'stale-sessions-repeatable',
         removeOnComplete: { count: 5 },
         removeOnFail: { count: 10 },

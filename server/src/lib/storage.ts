@@ -39,7 +39,7 @@ export const BUCKET = requireEnv('MINIO_BUCKET');
 
 export interface UploadStreamOptions {
   key: string;
-  body: PutObjectCommandInput['Body'];
+  body: Exclude<PutObjectCommandInput['Body'], undefined>;
   contentType: string;
   contentLength?: number;
 }
