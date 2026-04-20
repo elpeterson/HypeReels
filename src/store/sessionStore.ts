@@ -138,6 +138,7 @@ interface SessionStore {
   isInitialising: boolean
   initError: string | null
   isTabWarningVisible: boolean
+  ephemeralWarningDismissed: boolean
 
   // Actions — session
   initSession: (sessionId: string, token: string) => void
@@ -147,6 +148,7 @@ interface SessionStore {
   setInitError: (err: string | null) => void
   setIsInitialising: (v: boolean) => void
   setTabWarning: (visible: boolean) => void
+  dismissEphemeralWarning: () => void
 
   // Actions — clips
   addUploadingClip: (tempId: string, filename: string, sizeBytes: number) => void
@@ -189,7 +191,7 @@ interface SessionStore {
 
 // ─── Store implementation ─────────────────────────────────────────────────────
 
-const PERSISTED_KEYS = ['sessionId', 'token'] as const
+const PERSISTED_KEYS = ['sessionId', 'token', 'ephemeralWarningDismissed'] as const
 
 export const useSessionStore = create<SessionStore>()(
   persist(
@@ -207,6 +209,7 @@ export const useSessionStore = create<SessionStore>()(
       isInitialising: true,
       initError: null,
       isTabWarningVisible: false,
+      ephemeralWarningDismissed: false,
 
       // ── Session ──────────────────────────────────────────────────────────
       initSession: (sessionId, token) => {
@@ -234,6 +237,7 @@ export const useSessionStore = create<SessionStore>()(
       setInitError: (err) => set({ initError: err, isInitialising: false }),
       setIsInitialising: (v) => set({ isInitialising: v }),
       setTabWarning: (visible) => set({ isTabWarningVisible: visible }),
+      dismissEphemeralWarning: () => set({ ephemeralWarningDismissed: true }),
 
       // ── Clips ─────────────────────────────────────────────────────────────
       addUploadingClip: (tempId, filename, sizeBytes) =>

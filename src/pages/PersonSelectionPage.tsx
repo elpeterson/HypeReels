@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2, AlertCircle, Users } from 'lucide-react'
 import { useSessionStore } from '@/store'
@@ -9,6 +9,8 @@ import { PersonCard } from '@/components/PersonCard'
 import type { SSEDetectionComplete, SSEDetectionFailed } from '@/types'
 
 type DetectionPhase = 'idle' | 'triggering' | 'waiting' | 'done' | 'error'
+
+const POLL_INTERVAL_MS = 3000
 
 export function PersonSelectionPage() {
   const navigate = useNavigate()
@@ -32,12 +34,20 @@ export function PersonSelectionPage() {
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [personSkipped, setPersonSkipped] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const validClips = clips.filter((c) => c.status === 'valid')
   const clipsNeedingDetection = validClips.filter((c) => c.detectionStatus === 'pending')
   const allComplete = validClips.length > 0 && validClips.every((c) => c.detectionStatus === 'complete' || c.detectionStatus === 'failed')
   // Continue is allowed when: person is selected, skip was explicitly clicked, or no persons were detected
   const canContinue = !!selectedPersonRefId || personSkipped || personGroups.length === 0
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }
 
   // Kick off detection if clips haven't been processed yet
   useEffect(() => {
@@ -82,12 +92,14 @@ export function PersonSelectionPage() {
         addPersons(e.persons)
         updateClipFromSSE(e.clip_id, { detectionStatus: 'complete' })
 
-        // Check if all clips are done
         const updatedClips = useSessionStore.getState().clips
         const allDone = updatedClips
           .filter((c) => c.status === 'valid')
           .every((c) => c.detectionStatus === 'complete' || c.detectionStatus === 'failed')
-        if (allDone) setPhase('done')
+        if (allDone) {
+          stopPolling()
+          setPhase('done')
+        }
       }
 
       if (event.type === 'detection-failed') {
@@ -98,12 +110,46 @@ export function PersonSelectionPage() {
         const allDone = updatedClips
           .filter((c) => c.status === 'valid')
           .every((c) => c.detectionStatus === 'complete' || c.detectionStatus === 'failed')
-        if (allDone) setPhase('done')
+        if (allDone) {
+          stopPolling()
+          setPhase('done')
+        }
       }
     })
 
-    return () => sse.disconnect()
+    return () => {
+      sse.disconnect()
+      stopPolling()
+    }
   }, [sessionId, token, phase, addPersons, updateClipFromSSE])
+
+  // Polling fallback: GET /sessions/:id/persons every 3 s while waiting
+  useEffect(() => {
+    if (phase !== 'waiting' || !sessionId) return
+
+    stopPolling()
+    pollRef.current = setInterval(async () => {
+      if (!sessionId) return
+      try {
+        const apiPersons = await getPersons(sessionId)
+        setPersons(apiPersons)
+
+        // Check if all clips are now done by re-reading store
+        const updatedClips = useSessionStore.getState().clips
+        const allDone = updatedClips
+          .filter((c) => c.status === 'valid')
+          .every((c) => c.detectionStatus === 'complete' || c.detectionStatus === 'failed')
+        if (allDone) {
+          stopPolling()
+          setPhase('done')
+        }
+      } catch {
+        // Poll errors are non-fatal — SSE is primary
+      }
+    }, POLL_INTERVAL_MS)
+
+    return stopPolling
+  }, [phase, sessionId, setPersons])
 
   // If already done, load persons from API in case we navigated back
   useEffect(() => {
@@ -112,7 +158,10 @@ export function PersonSelectionPage() {
 
     getPersons(sessionId)
       .then((apiPersons) => setPersons(apiPersons))
-      .catch(() => {/* silently ignore */})
+      .catch((err: unknown) => {
+        const message = err instanceof ApiError ? err.message : 'Failed to load detected persons'
+        setError(message)
+      })
   }, [sessionId, phase, persons.length, setPersons])
 
   const handleSelect = async (personRefId: string) => {
@@ -144,6 +193,11 @@ export function PersonSelectionPage() {
   const handleBack = () => {
     setCurrentStep('upload-audio')
     navigate('/upload-song')
+  }
+
+  const handleUploadDifferentClips = () => {
+    setCurrentStep('upload-clips')
+    navigate('/upload-clips')
   }
 
   const handleContinue = () => {
@@ -191,12 +245,28 @@ export function PersonSelectionPage() {
 
       {/* No persons detected */}
       {phase === 'done' && personGroups.length === 0 && (
-        <div className="flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 py-12 text-center">
+        <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-gray-200 bg-gray-50 py-12 text-center">
           <Users className="h-10 w-10 text-gray-300" aria-hidden="true" />
           <p className="text-sm font-semibold text-gray-600">No people detected</p>
           <p className="max-w-xs text-xs text-gray-400">
-            No faces were found in your clips. You can still continue — the AI will use all footage.
+            No faces were found in your clips. You can continue without selecting a person, or upload different clips.
           </p>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={handleUploadDifferentClips}
+              className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
+            >
+              Upload different clips
+            </button>
+            <button
+              type="button"
+              onClick={handleContinue}
+              className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+            >
+              Continue without selecting
+            </button>
+          </div>
         </div>
       )}
 
@@ -253,14 +323,19 @@ export function PersonSelectionPage() {
             </button>
           )}
 
-          <button
-            type="button"
-            onClick={handleContinue}
-            disabled={isDetecting || !canContinue}
-            className="rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
-          >
-            Continue to Highlights
-          </button>
+          {/* Show Continue button:
+              - While detecting: always visible but disabled
+              - After detection: visible if persons found (empty state shows its own Continue) */}
+          {(isDetecting || personGroups.length > 0) && (
+            <button
+              type="button"
+              onClick={handleContinue}
+              disabled={isDetecting || !canContinue}
+              className="rounded-lg bg-brand-600 px-6 py-2.5 text-sm font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+            >
+              Continue to Highlights
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -9,7 +9,13 @@ import { JobProgressBar } from '@/components/JobProgressBar'
 import { cn } from '@/lib/utils'
 import type { GenerationStep, SSEGenerationProgress, SSEGenerationComplete, SSEGenerationFailed } from '@/types'
 
-const POLL_INTERVAL_MS = 5000
+// Spec: poll every 3s
+const POLL_INTERVAL_BASE_MS = 3000
+// Spec: exponential backoff when progress unchanged for 3 polls, max 15s
+const POLL_INTERVAL_MAX_MS = 15000
+const STALL_POLL_COUNT = 3
+// Spec: after 10 min stalled, show "Keep waiting" / "Cancel generation"
+const STALL_TIMEOUT_MS = 10 * 60 * 1000
 
 type BootstrapPhase = 'starting' | 'running' | 'complete' | 'failed'
 
@@ -42,12 +48,70 @@ export function GeneratePage() {
   const [phase, setPhase] = useState<BootstrapPhase>('starting')
   const [initError, setInitError] = useState<string | null>(null)
   const [isCancelling, setIsCancelling] = useState(false)
+  const [showStallDialog, setShowStallDialog] = useState(false)
   const sseRef = useRef<SSEClient | null>(null)
-  const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Backoff tracking
+  const pollIntervalRef = useRef<number>(POLL_INTERVAL_BASE_MS)
+  const lastProgressRef = useRef<number>(-1)
+  const unchangedPollCountRef = useRef<number>(0)
+
+  const scheduleNextPoll = (jobId: string) => {
+    if (pollTimerRef.current) clearTimeout(pollTimerRef.current)
+    pollTimerRef.current = setTimeout(() => pollJob(jobId), pollIntervalRef.current)
+  }
+
+  const pollJob = async (jobId: string) => {
+    if (!sessionId) return
+    try {
+      const job = await getJobStatus(sessionId, jobId)
+      setGenerationJob(job)
+
+      if (job.status === 'complete' && job.download_url) {
+        teardown()
+        completeJob(jobId, job.download_url, job.duration_ms ?? 0, job.size_bytes ?? 0)
+        setPhase('complete')
+        setCurrentStep('download')
+        navigate('/download')
+        return
+      }
+
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        teardown()
+        failJob(jobId, job.error_message ?? 'Generation failed')
+        setPhase('failed')
+        return
+      }
+
+      // Exponential backoff when progress stalls
+      const currentPct = job.progress_pct ?? 0
+      if (currentPct === lastProgressRef.current) {
+        unchangedPollCountRef.current += 1
+        if (unchangedPollCountRef.current >= STALL_POLL_COUNT) {
+          pollIntervalRef.current = Math.min(pollIntervalRef.current * 2, POLL_INTERVAL_MAX_MS)
+        }
+      } else {
+        lastProgressRef.current = currentPct
+        unchangedPollCountRef.current = 0
+        pollIntervalRef.current = POLL_INTERVAL_BASE_MS
+      }
+
+      scheduleNextPoll(jobId)
+    } catch {
+      // Poll errors are non-fatal — SSE is the primary channel
+      scheduleNextPoll(jobId)
+    }
+  }
 
   // SSE + polling setup
   const setupRealtime = (jobId: string) => {
     if (!sessionId || !token) return
+
+    // Reset backoff state
+    pollIntervalRef.current = POLL_INTERVAL_BASE_MS
+    lastProgressRef.current = -1
+    unchangedPollCountRef.current = 0
 
     // SSE
     sseRef.current = connectSSE(sessionId, token, (event) => {
@@ -55,6 +119,9 @@ export function GeneratePage() {
         const e = event as SSEGenerationProgress
         if (e.job_id === jobId) {
           updateJobProgress(jobId, e.step, e.pct)
+          // Reset backoff on any SSE progress
+          pollIntervalRef.current = POLL_INTERVAL_BASE_MS
+          unchangedPollCountRef.current = 0
         }
       }
       if (event.type === 'generation-complete') {
@@ -77,37 +144,28 @@ export function GeneratePage() {
       }
     })
 
-    // Fallback polling in case SSE drops
-    pollTimerRef.current = setInterval(async () => {
-      if (!sessionId) return
-      try {
-        const job = await getJobStatus(sessionId, jobId)
-        setGenerationJob(job)
+    // Polling fallback
+    scheduleNextPoll(jobId)
 
-        if (job.status === 'complete' && job.download_url) {
-          teardown()
-          completeJob(jobId, job.download_url, job.duration_ms ?? 0, job.size_bytes ?? 0)
-          setPhase('complete')
-          setCurrentStep('download')
-          navigate('/download')
-        } else if (job.status === 'failed' || job.status === 'cancelled') {
-          teardown()
-          failJob(jobId, job.error_message ?? 'Generation failed')
-          setPhase('failed')
-        }
-      } catch {
-        // Silently ignore poll errors — SSE is the primary channel
-      }
-    }, POLL_INTERVAL_MS)
+    // Stall timer — after 10 min show the stall dialog (no auto-cancel)
+    if (stallTimerRef.current) clearTimeout(stallTimerRef.current)
+    stallTimerRef.current = setTimeout(() => {
+      setShowStallDialog(true)
+    }, STALL_TIMEOUT_MS)
   }
 
   const teardown = () => {
     sseRef.current?.disconnect()
     sseRef.current = null
     if (pollTimerRef.current) {
-      clearInterval(pollTimerRef.current)
+      clearTimeout(pollTimerRef.current)
       pollTimerRef.current = null
     }
+    if (stallTimerRef.current) {
+      clearTimeout(stallTimerRef.current)
+      stallTimerRef.current = null
+    }
+    setShowStallDialog(false)
   }
 
   useEffect(() => {
@@ -144,7 +202,7 @@ export function GeneratePage() {
         setupRealtime(job_id)
       } catch (err: unknown) {
         if (cancelled) return
-        // STORY-013: 409 means a job is already active (e.g. double-submit)
+        // 409 means a job is already active (e.g. double-submit)
         const is409 = err instanceof ApiError && err.status === 409
         const message = is409
           ? 'A generation is already in progress. Please wait or go back and try again.'
@@ -166,6 +224,7 @@ export function GeneratePage() {
   const handleRetry = async () => {
     if (!sessionId || !generationJob) return
     setInitError(null)
+    setShowStallDialog(false)
     setPhase('starting')
 
     // Cancel the old job first (best-effort)
@@ -202,9 +261,21 @@ export function GeneratePage() {
 
     await Promise.race([cancelPromise, timeoutPromise])
 
+    teardown()
     setIsCancelling(false)
     setCurrentStep('review')
     navigate('/review')
+  }
+
+  const handleKeepWaiting = () => {
+    setShowStallDialog(false)
+    // Restart the stall timer
+    if (generationJob?.id) {
+      if (stallTimerRef.current) clearTimeout(stallTimerRef.current)
+      stallTimerRef.current = setTimeout(() => {
+        setShowStallDialog(true)
+      }, STALL_TIMEOUT_MS)
+    }
   }
 
   const isActive = phase === 'starting' || phase === 'running'
@@ -318,6 +389,43 @@ export function GeneratePage() {
           The AI is selecting your best moments, syncing cuts to the beat, and
           rendering the final video. Keep this tab open.
         </p>
+      )}
+
+      {/* 10-min stall dialog — no auto-cancel */}
+      {showStallDialog && isActive && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="stall-dialog-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        >
+          <div className="w-full max-w-sm rounded-2xl bg-white p-6 shadow-xl">
+            <h2 id="stall-dialog-title" className="text-base font-semibold text-gray-900">
+              This is taking longer than expected
+            </h2>
+            <p className="mt-2 text-sm text-gray-600">
+              Generation has been running for over 10 minutes without completing.
+              Your job is still in progress — it has not been cancelled.
+            </p>
+            <div className="mt-5 flex gap-3">
+              <button
+                type="button"
+                onClick={handleBack}
+                disabled={isCancelling}
+                className="flex-1 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-400"
+              >
+                Cancel generation
+              </button>
+              <button
+                type="button"
+                onClick={handleKeepWaiting}
+                className="flex-1 rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand-600"
+              >
+                Keep waiting
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )
