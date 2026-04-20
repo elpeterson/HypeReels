@@ -175,6 +175,10 @@ jobs:
         working-directory: workers
         run: |
           pip install --upgrade pip
+          # onnxruntime is omitted from requirements.txt (Dockerfile installs it
+          # via build-arg so GPU builds can swap in onnxruntime-gpu instead).
+          # Install the CPU wheel explicitly for the CI test run.
+          pip install onnxruntime
           pip install -r requirements.txt
           pip install pytest pytest-asyncio httpx
 
