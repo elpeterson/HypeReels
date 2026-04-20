@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,10 +49,10 @@ import numpy as np
 from dotenv import load_dotenv
 from insightface.app import FaceAnalysis
 
-from common.db import execute, fetchall, fetchone
+from common.db import execute
 from common.logger import get_logger
 from common.minio_client import download_to_tmp, generate_presigned_url, upload_bytes
-from common.redis_client import fail_job, fetch_next_job, job_context, publish_event
+from common.redis_client import fetch_next_job, job_context, publish_event
 
 load_dotenv()
 log = get_logger(__name__)

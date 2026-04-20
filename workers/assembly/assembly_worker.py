@@ -23,10 +23,8 @@ For each generation job:
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -42,7 +40,6 @@ from assembly.algorithm import (
     PhraseInfo,
     build_edl,
 )
-from assembly.edl import EDL, EDLSegment
 from common.db import execute, fetchall, fetchone
 from common.logger import get_logger
 from common.r2_client import (
@@ -350,7 +347,6 @@ def process_generation_job(job_data: dict[str, Any]) -> None:
 
         # 3. Download all unique clips needed
         clip_local_paths: dict[str, Path] = {}
-        needed_clip_ids = {s.clip_id for s in edl.segments}
         for seg in edl.segments:
             if seg.clip_id not in clip_local_paths:
                 local = download_to_tmp(seg.clip_r2_key, suffix=".mp4")

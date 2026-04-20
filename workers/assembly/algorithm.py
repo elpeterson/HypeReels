@@ -41,9 +41,7 @@ The output is an EDL dataclass (see edl.py).
 from __future__ import annotations
 
 import bisect
-import math
-from dataclasses import dataclass, field
-from typing import Literal
+from dataclasses import dataclass
 
 from assembly.edl import EDL, EDLSegment, SegmentSource
 

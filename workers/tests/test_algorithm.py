@@ -6,7 +6,6 @@ beat-sync scheduler with a variety of inputs.
 
 from __future__ import annotations
 
-import pytest
 
 from assembly.algorithm import (
     AssemblyRequest,

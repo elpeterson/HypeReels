@@ -10,16 +10,13 @@ bypassing download/DB/Redis logic entirely.
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
-import pytest
 
 # ── Import the functions under test ───────────────────────────────────────────
 # These imports must succeed without any env vars or DB connections.
 from audio_analysis.audio_analysis_worker import (
     TARGET_SR,
-    HOP_LENGTH,
     compute_energy_envelope,
     derive_downbeats,
     derive_phrases,
@@ -146,7 +143,7 @@ class TestExtractBeats:
             if 90.0 <= bpm <= 160.0:
                 hits += 1
         # At least 2 out of 3 runs should land in the right octave
-        assert hits >= 2, f"120 BPM click track detected with unexpected BPM across runs"
+        assert hits >= 2, "120 BPM click track detected with unexpected BPM across runs"
 
 
 # ── beats_ms list contract ────────────────────────────────────────────────────

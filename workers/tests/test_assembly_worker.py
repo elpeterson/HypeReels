@@ -20,9 +20,7 @@ Run with:
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -416,7 +414,6 @@ class TestAssemblyWorkerMinIOMock:
 
     def test_upload_called_with_output_r2_key(self, tmp_path):
         """The assembled MP4 must be uploaded to the pre-computed output_r2_key."""
-        from assembly.assembly_worker import probe_duration_ms, probe_size_bytes
 
         # This test validates the upload contract by mocking common.r2_client.upload_file
         output_key = "generated/sess-abc/hypereel_abcd1234.mp4"
