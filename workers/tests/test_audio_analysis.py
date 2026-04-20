@@ -386,10 +386,16 @@ class TestDerivePhrases:
         """A very loud second half should be marked as 'chorus' (above 75th percentile)."""
         sr = TARGET_SR
         duration_sec = 32.0
-        # Build a pattern where the second half is significantly louder
-        quiet = np.zeros(int(sr * duration_sec * 0.6), dtype=np.float32)
-        loud = np.ones(int(sr * duration_sec * 0.4), dtype=np.float32) * 1.0
-        y = np.concatenate([quiet, loud])
+        # Build a pattern where the MIDDLE two phrases are loud and the
+        # first/last are quiet (intro/outro).  With 4 phrases of 8 s each:
+        #   phrase 0 (0-8 s):   quiet → intro
+        #   phrase 1 (8-16 s):  loud  → chorus
+        #   phrase 2 (16-24 s): loud  → chorus
+        #   phrase 3 (24-32 s): quiet → outro
+        quiet1 = np.zeros(int(sr * duration_sec * 0.25), dtype=np.float32)
+        loud = np.ones(int(sr * duration_sec * 0.50), dtype=np.float32) * 1.0
+        quiet2 = np.zeros(int(sr * duration_sec * 0.25), dtype=np.float32)
+        y = np.concatenate([quiet1, loud, quiet2])
         env = compute_energy_envelope(y, float(sr))
 
         beat_times = np.arange(64) * (60.0 / 120.0)

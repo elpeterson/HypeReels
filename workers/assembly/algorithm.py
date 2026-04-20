@@ -424,6 +424,8 @@ def build_edl(request: AssemblyRequest) -> EDL:
                 used_start, used_end = _consume(locked_cand, consume_ms)
                 # Snap the song-time segment end to the nearest beat
                 seg_song_end = _snap_end(beat_start + consume_ms)
+                if seg_song_end <= song_cursor_ms:
+                    seg_song_end = min(beat_end, song_duration_ms)
                 segments.append(EDLSegment(
                     clip_id=locked_cand.clip_id,
                     clip_r2_key=locked_cand.clip_r2_key,
@@ -462,6 +464,12 @@ def build_edl(request: AssemblyRequest) -> EDL:
         used_start, used_end = _consume(best, consume_ms)
 
         seg_song_end = _snap_end(beat_start + consume_ms)
+        # Guard: if snap went backward or stayed the same (happens when the last
+        # beat is the only beat ≤ song_duration_ms and snapping finds it again),
+        # force the cursor to the beat window end so the loop always terminates.
+        if seg_song_end <= song_cursor_ms:
+            seg_song_end = min(beat_end, song_duration_ms)
+
         segments.append(EDLSegment(
             clip_id=best.clip_id,
             clip_r2_key=best.clip_r2_key,

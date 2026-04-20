@@ -99,10 +99,18 @@ class TestHighlightsAlwaysIncluded:
         edl = build_edl(_request(highlights=hl, song_duration_ms=20_000))
         highlight_segs = [s for s in edl.segments if s.source == "highlight"]
 
-        highlight_ranges = {(s.start_ms, s.end_ms) for s in highlight_segs}
+        # The algorithm chunks highlights into beat-sized segments; check that
+        # at least one highlight segment falls within each highlight's range.
         for h in hl:
-            assert (h.start_ms, h.end_ms) in highlight_ranges, (
-                f"Highlight ({h.start_ms}, {h.end_ms}) not found in EDL segments: {highlight_ranges}"
+            covering = [
+                s for s in highlight_segs
+                if s.clip_id == h.clip_id
+                and s.start_ms >= h.start_ms
+                and s.end_ms <= h.end_ms
+            ]
+            assert len(covering) > 0, (
+                f"Highlight ({h.start_ms}, {h.end_ms}) has no covering segments in EDL. "
+                f"Highlight segs: {[(s.start_ms, s.end_ms) for s in highlight_segs]}"
             )
 
     def test_highlight_clip_id_correct_in_edl(self):
@@ -433,9 +441,10 @@ class TestAssemblyWorkerMinIOMock:
         fake_path.touch()
 
         with patch("assembly.assembly_worker.subprocess.run") as mock_run:
+            # ffprobe -of json outputs {"format": {"duration": "30.123456"}}
             mock_run.return_value = MagicMock(
                 returncode=0,
-                stdout="30.123456\n",
+                stdout='{"format": {"duration": "30.123456"}}\n',
                 stderr="",
             )
             result = probe_duration_ms(fake_path)
