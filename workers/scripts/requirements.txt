@@ -1,0 +1,12 @@
+# HypeReels Python ML script dependencies (workers/scripts/)
+#
+# onnxruntime is intentionally NOT listed here — the Dockerfile and CI install
+# either onnxruntime (CPU) or onnxruntime-gpu (NVIDIA) before this file so
+# insightface finds it during its own setup.
+# pytest is installed separately in CI and is not a runtime dependency.
+insightface==0.7.3
+librosa
+numpy
+opencv-python-headless
+soundfile
+scipy

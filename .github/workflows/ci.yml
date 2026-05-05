@@ -1,0 +1,183 @@
+###############################################################################
+# HypeReels — CI/CD Pipeline
+#
+# Jobs (in dependency order):
+#   lint   → typecheck + ESLint
+#   test   → frontend Jest tests + Python pytest (if tests exist)
+#   build  → Docker image build verification (no push)
+#   push   → push image to ghcr.io with git SHA tag (main branch only)
+#
+# Rules:
+#   - Docker images are tagged with the git SHA, never "latest"
+#   - push job runs only on push to main; PRs and feature branches stop at build
+#   - Concurrency: cancel in-progress runs on the same branch/PR
+###############################################################################
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+      - "chore/**"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/hypereels-app
+
+jobs:
+  # ── Lint ─────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript typecheck
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        run: npm run lint
+
+  # ── Test ─────────────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Frontend tests ──────────────────────────────────────────────────────
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Run frontend tests
+        working-directory: frontend
+        run: npm test
+
+      # ── Python tests ────────────────────────────────────────────────────────
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install onnxruntime
+          if [ -f workers/scripts/requirements.txt ]; then
+            pip install -r workers/scripts/requirements.txt
+          else
+            # Minimal set matching Dockerfile.app when requirements.txt is absent
+            pip install \
+              "insightface==0.7.3" \
+              librosa \
+              numpy \
+              opencv-python-headless \
+              soundfile \
+              scipy \
+              pytest
+          fi
+
+      - name: Run Python tests
+        run: |
+          if [ -d workers/scripts ] && find workers/scripts -name "test_*.py" -o -name "*_test.py" | grep -q .; then
+            python -m pytest workers/scripts/ -v
+          else
+            echo "No Python tests found — skipping pytest"
+          fi
+
+  # ── Build ─────────────────────────────────────────────────────────────────────
+  build:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.app
+          push: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Push (main branch only) ───────────────────────────────────────────────────
+  push:
+    name: Push image to GHCR
+    runs-on: ubuntu-latest
+    needs: build
+    # Only run on pushes to main — never on PRs or feature branches
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image with git SHA tag
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.app
+          push: true
+          # Tag with git SHA only — never "latest"
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
