@@ -1,0 +1,142 @@
+###############################################################################
+# HypeReels — Docker Compose
+#
+# Single compose file for both deployment profiles:
+#   Profile 1 (CPU-only)   — docker compose up  (no changes required)
+#   Profile 2 (GPU-enabled) — set FFMPEG_HWACCEL=nvenc and
+#                             INSIGHTFACE_PROVIDERS=CUDAExecutionProvider in .env
+#
+# GPU passthrough (deploy.resources) is silently ignored on hosts without the
+# NVIDIA Container Toolkit — CPU-only machines need no config change.
+#
+# Services:
+#   app        — Next.js + embedded BullMQ worker
+#   redis      — Job queue + session KV store
+#   minio      — S3-compatible object storage
+#   minio-init — One-shot bucket creation (runs once on first start)
+###############################################################################
+
+services:
+
+  # ── Application ─────────────────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.app
+    image: hypereels-app:local
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hypereels}
+      # GPU acceleration — opt-in via .env; CPU is the default
+      FFMPEG_HWACCEL: ${FFMPEG_HWACCEL:-}
+      INSIGHTFACE_PROVIDERS: ${INSIGHTFACE_PROVIDERS:-CPUExecutionProvider}
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3000}
+    depends_on:
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - internal
+    # NVIDIA GPU passthrough — silently ignored when NVIDIA Container Toolkit
+    # is not installed. CPU-only hosts require no changes here.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - internal
+    # Redis is intentionally NOT exposed to the host — access via app only
+
+  # ── MinIO ────────────────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - internal
+    # MinIO API and console are intentionally NOT exposed to the host.
+    # Presigned URLs are the only access path (internal Docker network).
+    # To access the MinIO console during development, add:
+    #   ports:
+    #     - "9001:9001"
+
+  # ── MinIO bucket initialisation ──────────────────────────────────────────────
+  # One-shot container: creates the hypereels bucket on first run.
+  # Exits 0 immediately after bucket is created (or already exists).
+  minio-init:
+    image: minio/minio:latest
+    entrypoint: >
+      /bin/sh -c "
+        until curl -sf http://minio:9000/minio/health/live; do
+          echo 'Waiting for MinIO...'; sleep 2;
+        done;
+        mc alias set local http://minio:9000
+          $${MINIO_ROOT_USER:-minioadmin}
+          $${MINIO_ROOT_PASSWORD:-minioadmin};
+        mc mb --ignore-existing local/${MINIO_BUCKET:-hypereels};
+        echo 'Bucket ready.';
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-hypereels}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - internal
+    restart: "no"
+
+# ── Volumes ──────────────────────────────────────────────────────────────────
+volumes:
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+
+# ── Networks ─────────────────────────────────────────────────────────────────
+networks:
+  internal:
+    driver: bridge
