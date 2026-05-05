@@ -1,0 +1,13 @@
+# HypeReels Python worker dependencies
+# Installed in docker/Dockerfile.app and in the CI test job.
+#
+# onnxruntime must be installed before insightface so it is detected
+# during insightface's own package setup.
+onnxruntime
+insightface==0.7.3
+librosa
+numpy
+opencv-python-headless
+soundfile
+scipy
+pytest
