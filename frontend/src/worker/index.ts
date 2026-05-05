@@ -219,7 +219,8 @@ async function handleDetectPersons(job: Job<DetectPersonsJobData>): Promise<void
     }
 
     // Write merged persons to Redis
-    await setPersons(session_id, Object.values(allPersons));
+    // DetectedPerson and Person share the same shape — cast is safe
+    await setPersons(session_id, Object.values(allPersons) as import("../types").Person[]);
 
     // Update session state back to uploading (detection done, user can continue)
     await updateSessionState(session_id, "uploading");

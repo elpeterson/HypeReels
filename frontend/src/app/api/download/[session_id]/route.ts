@@ -3,8 +3,10 @@
  *
  * Verify session state is ready and not expired.
  * Issue a presigned GET URL (5-minute TTL) for the reel.
- * Enqueue cleanup-session job (delayed 60s).
- * Redirect to presigned URL.
+ * Enqueues cleanup-session job (delayed 60s).
+ * Returns JSON { download_url } so the frontend can trigger a native browser
+ * download via a hidden anchor element (a 302 redirect cannot simultaneously
+ * trigger a download in the browser's fetch context).
  *
  * If session expired: return 410 Gone.
  * If session not ready: return 409 Conflict.
@@ -72,8 +74,10 @@ export async function GET(
       );
     });
 
-    // Redirect browser to presigned MinIO URL
-    return NextResponse.redirect(downloadUrl, { status: 302 });
+    // Return JSON so the frontend can use a hidden <a download> anchor.
+    // A 302 redirect cannot simultaneously trigger a native browser download
+    // when initiated from a fetch() call.
+    return NextResponse.json({ download_url: downloadUrl });
   } catch (err) {
     console.error("[GET /api/download/[session_id]] error:", err);
     return internalError();
