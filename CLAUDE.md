@@ -1,7 +1,7 @@
 # HypeReels
 
 ## Status
-**Fresh start.** The previous implementation has been deleted. MVP scope is being redefined. No architecture, no code, no docs yet.
+**In progress.** User stories defined (docs/user-stories.md). Next: `@architect`.
 
 ## Product
 
@@ -19,7 +19,7 @@ HypeReels is a web application that automatically generates high-energy "hype re
 
 ## MVP Scope
 
-> **Not yet defined.** Kick off with `@product-owner` to produce `docs/user-stories.md`.
+User stories: see `docs/user-stories.md`.
 
 Hard constraints for MVP scoping:
 - **No authentication.** Sessions are ephemeral UUID tokens only.
@@ -27,6 +27,19 @@ Hard constraints for MVP scoping:
 - **No multi-user.** Single-session, single-user flow.
 - **No mobile app.** Web only.
 - **One person of interest.** Multi-person selection is Future.
+
+## GPU Acceleration Policy
+
+This is a permanent product decision, not just an MVP constraint:
+
+| Deployment | GPU Acceleration |
+|------------|-----------------|
+| **Local (self-hosted Docker)** | NVIDIA only (CUDA + ONNX `CUDAExecutionProvider`). All other hardware (AMD, Intel, Apple Silicon) uses CPU-only path. |
+| **Cloud (`hypereels.elpeterson.com`)** | Future. Users on non-NVIDIA hardware who want GPU-accelerated generation should use the hosted cloud version. |
+
+**Rationale:** AMD ROCm support requires a separate `onnxruntime-rocm` wheel (Linux-only, complex Docker setup, limited GPU compatibility). Apple Silicon Metal/ANE is similarly non-trivial. Maintaining multiple GPU backends for local deployment is not worth the complexity — NVIDIA + CPU covers the MVP hardware matrix cleanly.
+
+**Future:** When `hypereels.elpeterson.com` launches, it will run on NVIDIA infrastructure and serve as the GPU-accelerated path for non-NVIDIA users.
 
 ## Engineering Workflow
 
