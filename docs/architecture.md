@@ -245,8 +245,8 @@ Audio analysis:
 
 1. User clicks "Download Reel" → browser calls `GET /api/download/{session_id}`.
 2. Next.js verifies session state is `ready` and not expired; enqueues `cleanup-session` job (runs in 60 seconds). **[async]**
-3. Next.js issues presigned GET URL for `{session_id}/reel.mp4` (5-minute TTL); returns redirect.
-4. Browser downloads MP4 directly from MinIO.
+3. Next.js issues presigned GET URL for `{session_id}/reel.mp4` (5-minute TTL); returns JSON `{ download_url }` (not a 302 redirect — frontend triggers download via a hidden anchor element).
+4. Browser downloads MP4 directly from MinIO using the presigned URL.
 5. If download fails: presigned URL is still valid for up to 5 minutes; frontend can retry `GET /api/download/{session_id}` to get a fresh URL **before** cleanup job runs.
 6. Cleanup job runs: deletes all MinIO objects under `{session_id}/` prefix; deletes all Redis keys for session. **[async]**
 7. If session TTL expires before download: MinIO lifecycle policy deletes objects; Next.js returns `410 Gone` with `{"error":"session_expired"}`.
@@ -342,13 +342,14 @@ Full API specification belongs in `docs/api-spec.md` — not in scope for this a
 | `POST` | `/api/upload/audio` | Request presigned PUT URL for audio upload |
 | `POST` | `/api/upload/audio/complete` | Confirm audio upload complete |
 | `GET` | `/api/session/{id}` | Get full session state (clips, audio, persons, state) |
+| `GET` | `/api/session/{id}/persons` | Get detected persons list (`persons:{session_id}` Redis key) |
 | `POST` | `/api/jobs/detect-persons` | Enqueue person detection across all session clips |
 | `GET` | `/api/jobs/{job_id}/progress` | Poll job progress (stage, pct, message) |
 | `PATCH` | `/api/session/{id}/clips/{clip_id}/highlights` | Add or update a highlight range on a clip |
 | `DELETE` | `/api/session/{id}/clips/{clip_id}/highlights/{highlight_id}` | Remove a highlight |
 | `POST` | `/api/session/{id}/person` | Set selected person of interest (or clear) |
 | `POST` | `/api/jobs/generate-reel` | Enqueue reel generation |
-| `GET` | `/api/download/{session_id}` | Issue presigned download URL; enqueue cleanup |
+| `GET` | `/api/download/{session_id}` | Return `{ download_url }` JSON; enqueue cleanup |
 
 ---
 
