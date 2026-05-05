@@ -10,8 +10,26 @@ Upload one or more video clips and an audio track. HypeReels detects people in y
 
 **All hosts:**
 
-- [Docker Engine](https://docs.docker.com/engine/install/) 24+
-- [Docker Compose](https://docs.docker.com/compose/install/) v2.20+ (bundled with Docker Desktop)
+- [Docker Engine](https://docs.docker.com/engine/install/) 24+ with the Compose plugin
+
+> **Easiest option — Docker Desktop (macOS / Windows / Linux):**  
+> Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) — it bundles Docker Engine and Compose together. After install, `docker compose version` should print a version number.
+>
+> **Linux without Docker Desktop:**  
+> Install Docker Engine, then add the Compose plugin:
+> ```bash
+> # Debian / Ubuntu
+> sudo apt-get install docker-compose-plugin
+> # Fedora / RHEL
+> sudo dnf install docker-compose-plugin
+> ```
+> Or follow the [official Compose plugin install guide](https://docs.docker.com/compose/install/linux/).
+>
+> **Verify your setup before continuing:**
+> ```bash
+> docker compose version   # must print a version — if this errors, Compose is not installed
+> docker version           # must print Client and Server versions
+> ```
 
 **NVIDIA GPU hosts only:**
 

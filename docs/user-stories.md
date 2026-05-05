@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-05 (STORY-010 added)
+> **Last updated:** 2026-05-05 (STORY-011 added)
 
 ---
 
@@ -216,6 +216,25 @@
 - [ ] Given the README.md and all files under docs/deployment/ contained the old single-command form (`docker compose up --build -d`), when the fix is applied, then no occurrence of `--build` as a flag to `docker compose up` remains in any user-facing documentation or quickstart guide in the repository.
 
 **Out of Scope:** Changing the Docker or Docker Compose version requirements; adding a compatibility wrapper script; modifying docker-compose.yml service definitions; any runtime behavior change to the services themselves.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P1  **Sprint:** MVP
+
+---
+
+### [STORY-011] Verify Docker Compose Is Installed
+
+**User Story:** As an operator, I want the setup documentation to tell me how to verify and install Docker Compose so that I am not blocked by a missing prerequisite before the system even starts.
+
+**Acceptance Criteria:**
+- [ ] Given an operator who has Docker Engine installed but has never installed the Compose plugin, when they follow the README prerequisites section, then explicit instructions (or a link to official Docker docs) tell them how to install Docker Compose v2 for their platform (Linux package manager, Docker Desktop, or manual plugin install).
+- [ ] Given an operator who reads the prerequisites section before running any commands, when they execute the documented verification step (e.g. `docker compose version`), then the output confirms Compose is available and meets the minimum version requirement (v2.20+).
+- [ ] Given an operator on a system where only the v1 standalone binary (`docker-compose`) is present, when they read the prerequisites section, then the documentation explicitly states that v1 is not supported and directs them to upgrade to v2.
+- [ ] Given an operator whose `docker compose version` output shows a version below v2.20, when they read the prerequisites section, then the documentation states the minimum required version and links to upgrade instructions.
+- [ ] Given the README currently lists "Docker Compose v2.20+ (bundled with Docker Desktop)" as a prerequisite without install guidance, when the fix is applied, then that line is replaced or augmented with a verification command and a link or inline steps covering at least two installation paths (Docker Desktop and the standalone Compose plugin for Linux).
+
+**Out of Scope:** Automating prerequisite checks via a shell script; supporting Docker Compose v1; modifying docker-compose.yml or any application code; runtime behavior changes.
 
 **Open Questions:** None
 
