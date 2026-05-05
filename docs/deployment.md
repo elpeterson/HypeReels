@@ -33,8 +33,9 @@ cd hypereels
 cp .env.example .env
 # Edit .env if you want to change credentials or ports
 
-# 3. Start all services
-docker compose up --build -d
+# 3. Build images then start all services
+docker compose build
+docker compose up -d
 
 # 4. Verify all services are healthy (wait ~60 s after startup)
 docker compose ps
@@ -54,8 +55,9 @@ The app is available at **http://localhost:3000**.
 echo "FFMPEG_HWACCEL=nvenc" >> .env
 echo "INSIGHTFACE_PROVIDERS=CUDAExecutionProvider" >> .env
 
-# 5. Start with GPU passthrough
-docker compose up --build -d
+# 5. Build and start with GPU passthrough
+docker compose build
+docker compose up -d
 
 # 6. Verify GPU is in use
 docker compose logs app | grep -E "(CUDA|NVENC|CPUExecutionProvider)"
@@ -124,7 +126,8 @@ docker compose restart app
 git pull
 
 # Rebuild and restart the app container
-docker compose up --build -d app
+docker compose build app
+docker compose up -d app
 ```
 
 ---

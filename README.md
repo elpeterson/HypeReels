@@ -26,7 +26,8 @@ Works on any hardware — Intel, AMD, or Apple Silicon.
 git clone https://github.com/elpeterson/HypeReels.git
 cd HypeReels
 cp .env.example .env
-docker compose up --build -d
+docker compose build
+docker compose up -d
 ```
 
 Open **http://localhost:3000**.
@@ -44,7 +45,8 @@ cp .env.example .env
 echo "FFMPEG_HWACCEL=nvenc" >> .env
 echo "INSIGHTFACE_PROVIDERS=CUDAExecutionProvider" >> .env
 
-docker compose up --build -d
+docker compose build
+docker compose up -d
 ```
 
 Open **http://localhost:3000**.
