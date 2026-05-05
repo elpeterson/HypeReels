@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-05 (STORY-011 added)
+> **Last updated:** 2026-05-05 (STORY-012 added)
 
 ---
 
@@ -247,6 +247,24 @@
 | Input | Reason | Alternative |
 |-------|--------|-------------|
 | Web hosting at hypereels.elpeterson.com | Explicitly tagged Future in CLAUDE.md. Cloud deployment is out of MVP scope. | No in-scope alternative — this is a post-MVP infrastructure concern. |
+
+---
+
+### [STORY-012] Fix Next.js Config Extension
+
+**User Story:** As an operator, I want the frontend Docker build to complete without errors so that the application can be deployed.
+
+**Acceptance Criteria:**
+- [ ] Given the frontend service is built via `docker compose build` (or `npm run build` directly), when the build runs, then it completes without the error "Configuring Next.js via 'next.config.ts' is not supported."
+- [ ] Given `frontend/next.config.mjs` exists and `frontend/next.config.ts` does not, when `npm run build` runs with Next.js 14, then Next.js loads the configuration successfully and the build proceeds past the config-loading step.
+- [ ] Given the renamed config file uses ESM JavaScript syntax (no TypeScript type annotations), when the build runs in any Node.js environment required by Next.js 14, then no syntax or module-type errors are reported.
+- [ ] Given the repository no longer contains `frontend/next.config.ts`, when any CI pipeline runs `npm run build`, then the build succeeds end-to-end and produces a `.next` output directory.
+
+**Out of Scope:** Upgrading Next.js to version 15 or later; changing any runtime behavior of the Next.js configuration; modifying other frontend build tooling.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P0  **Sprint:** MVP
 
 ---
 
