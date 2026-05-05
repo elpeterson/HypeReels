@@ -1,0 +1,6 @@
+insightface==0.7.3
+librosa
+numpy
+opencv-python-headless
+soundfile
+scipy
