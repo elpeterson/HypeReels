@@ -1,6 +1,5 @@
-import type { NextConfig } from "next";
-
-const nextConfig: NextConfig = {
+/** @type {import('next').NextConfig} */
+const nextConfig = {
   // Enable Next.js instrumentation (starts BullMQ worker at server boot)
   experimental: {
     instrumentationHook: true,
