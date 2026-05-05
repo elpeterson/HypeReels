@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-05
+> **Last updated:** 2026-05-05 (STORY-010 added)
 
 ---
 
@@ -201,6 +201,25 @@
 - Is Apple Silicon Neural Engine (ANE) or Metal GPU acceleration in scope for a future story, or permanently deferred? (No action needed for MVP — CPU path covers M2.)
 
 **Size:** M  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-010] Fix Docker Compose Start Command
+
+**User Story:** As an operator, I want the quickstart command to work on any supported Docker installation so that I can start HypeReels without hitting an error before the system even runs.
+
+**Acceptance Criteria:**
+- [ ] Given an operator with Docker Compose v1 (standalone plugin) installed, when they follow the quickstart instructions exactly as written, then every command succeeds without "unknown flag" or other CLI errors.
+- [ ] Given an operator with Docker Compose v2 (bundled with Docker Desktop or the docker-compose-plugin package) installed, when they follow the quickstart instructions exactly as written, then every command succeeds without errors.
+- [ ] Given the updated quickstart uses the two-step form (`docker compose build` followed by `docker compose up -d`), when an operator runs both commands in sequence, then all services start and report healthy within 60 seconds, identical to the previous single-command behavior.
+- [ ] Given an operator runs `docker compose build` and one or more images fail to build, when the build step exits with an error, then no containers are started and the error output is visible in the terminal without ambiguity (not silently swallowed by a combined command).
+- [ ] Given the README.md and all files under docs/deployment/ contained the old single-command form (`docker compose up --build -d`), when the fix is applied, then no occurrence of `--build` as a flag to `docker compose up` remains in any user-facing documentation or quickstart guide in the repository.
+
+**Out of Scope:** Changing the Docker or Docker Compose version requirements; adding a compatibility wrapper script; modifying docker-compose.yml service definitions; any runtime behavior change to the services themselves.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P1  **Sprint:** MVP
 
 ---
 
