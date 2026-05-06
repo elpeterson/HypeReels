@@ -203,25 +203,29 @@ export default function DownloadPage() {
           </p>
         </div>
 
-        {downloadState === "error" ? (
-          <Button
-            size="lg"
-            onClick={handleRetry}
-            loading={downloadState === "downloading"}
-          >
-            Try Download Again
-          </Button>
-        ) : (
-          <Button
-            size="lg"
-            onClick={handleDownloadClick}
-            loading={downloadState === "downloading"}
-            loadingText="Preparing download…"
-            disabled={downloadState === "downloading" || downloadState === "confirming"}
-          >
-            Download Reel
-          </Button>
-        )}
+        {(() => {
+          const isDownloading = downloadState === "downloading";
+          const isBusy = isDownloading || downloadState === "confirming";
+          return downloadState === "error" ? (
+            <Button
+              size="lg"
+              onClick={handleRetry}
+              loading={false}
+            >
+              Try Download Again
+            </Button>
+          ) : (
+            <Button
+              size="lg"
+              onClick={handleDownloadClick}
+              loading={isDownloading}
+              loadingText="Preparing download…"
+              disabled={isBusy}
+            >
+              Download Reel
+            </Button>
+          );
+        })()}
 
         <p className="text-xs text-gray-600 text-center max-w-xs">
           Clicking download will permanently delete all source files after the
