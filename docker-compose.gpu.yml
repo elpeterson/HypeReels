@@ -1,0 +1,24 @@
+###############################################################################
+# HypeReels — NVIDIA GPU override
+#
+# Extends docker-compose.yml with NVIDIA GPU passthrough.
+# Requires: Linux host + NVIDIA driver 525+ + NVIDIA Container Toolkit.
+# Does NOT work on macOS or Windows (Docker Desktop has no GPU passthrough).
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+#
+# Then set in your .env:
+#   FFMPEG_HWACCEL=nvenc
+#   INSIGHTFACE_PROVIDERS=CUDAExecutionProvider
+###############################################################################
+
+services:
+  app:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -52,7 +52,7 @@ Open **http://localhost:3000**.
 
 ## NVIDIA GPU Quickstart
 
-Requires an NVIDIA GPU and the NVIDIA Container Toolkit (see Prerequisites above).
+Requires Linux + NVIDIA GPU + NVIDIA Container Toolkit. **Not supported on macOS or Windows Docker Desktop.**
 
 ```bash
 git clone https://github.com/elpeterson/HypeReels.git
@@ -63,8 +63,8 @@ cp .env.example .env
 echo "FFMPEG_HWACCEL=nvenc" >> .env
 echo "INSIGHTFACE_PROVIDERS=CUDAExecutionProvider" >> .env
 
-docker compose build
-docker compose up -d
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
 Open **http://localhost:3000**.

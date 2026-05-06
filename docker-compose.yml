@@ -1,13 +1,14 @@
 ###############################################################################
-# HypeReels — Docker Compose
+# HypeReels — Docker Compose (CPU-only / default)
 #
-# Single compose file for both deployment profiles:
-#   Profile 1 (CPU-only)   — docker compose up  (no changes required)
-#   Profile 2 (GPU-enabled) — set FFMPEG_HWACCEL=nvenc and
-#                             INSIGHTFACE_PROVIDERS=CUDAExecutionProvider in .env
+# Works on ALL hardware — macOS, Linux, Windows, AMD, Apple Silicon.
+# No NVIDIA GPU block here; it is in docker-compose.gpu.yml.
 #
-# GPU passthrough (deploy.resources) is silently ignored on hosts without the
-# NVIDIA Container Toolkit — CPU-only machines need no config change.
+#   CPU-only (default):
+#     docker compose up -d
+#
+#   NVIDIA GPU (Linux + NVIDIA Container Toolkit required):
+#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 #
 # Services:
 #   app        — Next.js + embedded BullMQ worker
@@ -51,15 +52,6 @@ services:
       start_period: 30s
     networks:
       - internal
-    # NVIDIA GPU passthrough — silently ignored when NVIDIA Container Toolkit
-    # is not installed. CPU-only hosts require no changes here.
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
 
   # ── Redis ────────────────────────────────────────────────────────────────────
   redis:

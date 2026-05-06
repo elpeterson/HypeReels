@@ -48,6 +48,9 @@ The app is available at **http://localhost:3000**.
 
 ## NVIDIA GPU Quickstart
 
+> **Linux only.** macOS and Windows Docker Desktop do not support GPU passthrough.
+> Requires NVIDIA driver 525+ and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+
 ```bash
 # 1–3: Same as CPU-only above
 
@@ -55,9 +58,9 @@ The app is available at **http://localhost:3000**.
 echo "FFMPEG_HWACCEL=nvenc" >> .env
 echo "INSIGHTFACE_PROVIDERS=CUDAExecutionProvider" >> .env
 
-# 5. Build and start with GPU passthrough
-docker compose build
-docker compose up -d
+# 5. Build and start using the GPU override file
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml build
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 # 6. Verify GPU is in use
 docker compose logs app | grep -E "(CUDA|NVENC|CPUExecutionProvider)"
