@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-023 added)
+> **Last updated:** 2026-05-06 (STORY-024 added)
 
 ---
 
@@ -541,6 +541,29 @@ Bug 2 — Thumbnail path mismatch:
 **Open Questions:** None
 
 **Size:** S  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-024] Fix Person Cards Showing Placeholder Silhouette — thumbnail_url Never Populated
+
+**User Story:** As a user, I want each detected person card on the person-selection page to display the actual face crop thumbnail so that I can visually identify the people detected in my clips.
+
+**Acceptance Criteria:**
+- [ ] Given person detection has completed and thumbnails were successfully uploaded to MinIO, when the person-selection page renders, then each person card displays the actual detected face crop image instead of the grey silhouette placeholder.
+- [ ] Given person detection has completed and one specific person's thumbnail is missing from MinIO, when the person-selection page renders, then that card shows the silhouette placeholder while all other cards display their correct face crop images.
+- [ ] Given multiple persons were detected, when `GET /api/session/{id}/persons` responds, then every person object in the response includes a non-null `thumbnail_url` containing a presigned GET URL for their face crop (for persons whose thumbnail exists in MinIO).
+- [ ] Given multiple persons were detected, when the API response time is measured, then presigned URL generation does not introduce a perceptible delay (URLs are generated in parallel).
+
+**Root Cause (fixed):** The `Person` type has two fields: `thumbnail` (the MinIO object key, e.g. `{sessionId}/persons/{id}.jpg`) and `thumbnail_url` (a browser-accessible presigned GET URL). The worker correctly stored the MinIO object key in `person.thumbnail` when uploading the face crop. However, `GET /api/session/{id}/persons` returned persons directly from Redis without generating presigned GET URLs, so `thumbnail_url` was always `null`. `PersonCard` only renders an `<img>` when `person.thumbnail_url` is non-null; otherwise it shows the silhouette placeholder. As a result, valid thumbnails existed in MinIO but were never surfaced to the browser.
+
+**Fixes applied:**
+- `GET /api/session/[id]/persons` route: Added post-fetch hydration that calls `createPresignedGetUrl(person.thumbnail)` for each person before returning the response. All presigned URLs are generated in parallel with `Promise.all`. Per-person errors are caught individually and fall back to `thumbnail_url: null` so a single missing thumbnail never blocks the entire response.
+
+**Out of Scope:** Changes to how the worker uploads thumbnails; changes to the `PersonCard` rendering logic; altering the MinIO object key scheme; multi-person selection (post-MVP).
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P0  **Sprint:** MVP
 
 ---
 
