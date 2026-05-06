@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-05 (STORY-013 added)
+> **Last updated:** 2026-05-05 (STORY-016 added)
 
 ---
 
@@ -318,6 +318,26 @@
 **Open Questions:** None
 
 **Size:** XS  **Priority:** P1  **Sprint:** MVP
+
+---
+
+### [STORY-016] Fix GPU Block Crashes Mac Docker
+
+**User Story:** As an operator on a machine without an NVIDIA GPU (e.g. a MacBook), I want `docker compose up` to start all services without error so that I am not blocked before the application even runs.
+
+**Acceptance Criteria:**
+- [ ] Given a machine with no NVIDIA GPU (e.g. M2 MacBook or any CPU-only host running Docker Desktop on macOS), when the operator runs `docker compose up -d` using only `docker-compose.yml`, then all services start successfully with no error referencing a device driver, NVIDIA, or GPU reservation.
+- [ ] Given a machine with an NVIDIA GPU and the NVIDIA Container Toolkit installed (Linux Docker Engine), when the operator runs `docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d`, then all services start with GPU passthrough active and CUDA-accelerated execution paths are used.
+- [ ] Given `docker-compose.yml` contains no `deploy.resources.reservations.devices` block, when an operator on any platform runs `docker compose up -d`, then Docker Desktop on macOS and Docker Engine on Linux both start all services without a device-driver error.
+- [ ] Given `docker-compose.gpu.yml` exists as a Compose override file, when the operator merges it with the base file via `-f docker-compose.yml -f docker-compose.gpu.yml`, then the resulting configuration adds the NVIDIA device reservation to the appropriate service(s) and no other service configuration is altered.
+- [ ] Given the README and all files under `docs/deployment/` previously documented a single-file `docker compose up` that included GPU passthrough, when the fix is applied, then every user-facing quickstart and deployment guide is updated to document both the CPU-only command (`docker compose up -d`) and the GPU command (`docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d`), with no occurrence of the old single-file GPU invocation remaining.
+- [ ] Given an operator sets `FFMPEG_HWACCEL=nvenc` but runs only the base `docker-compose.yml` (no GPU override), when services start, then the system detects no CUDA device and falls back to x264 without crashing, consistent with the behaviour specified in STORY-008 AC 5.
+
+**Out of Scope:** Changing any runtime AI/ML or FFmpeg execution logic; adding GPU support for AMD ROCm or Apple Metal; Kubernetes or multi-host deployment; creating a shell wrapper script that auto-detects GPU presence.
+
+**Open Questions:** None
+
+**Size:** S  **Priority:** P0  **Sprint:** MVP
 
 ---
 
