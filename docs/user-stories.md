@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-025 added)
+> **Last updated:** 2026-05-06 (STORY-028 added)
 
 ---
 
@@ -589,6 +589,103 @@ Bug 2 — Thumbnail path mismatch:
 **Open Questions:** None
 
 **Size:** S  **Priority:** P0  **Sprint:** MVP
+
+---
+
+---
+
+### [STORY-026] Cross-Clip Person Deduplication
+
+**User Story:** As a user, I want the system to automatically recognize when the same person appears in multiple clips so that they show up as a single card on the person-selection page rather than as duplicate cards I have to guess are the same individual.
+
+**Acceptance Criteria:**
+- [ ] Given the user has uploaded multiple clips, and a person appears in more than one clip, when person detection completes, then that person is represented by a single card on the person-selection page (not one card per clip).
+- [ ] Given a single merged person card is shown, when the user selects that person as their person of interest, then the reel prioritizes their appearances across all clips in which they were detected — not just the clip where they were first seen.
+- [ ] Given two detected persons are actually different individuals (their representative embeddings have cosine distance ≥ `FACE_SIMILARITY_THRESHOLD = 0.55`), when deduplication runs, then they remain as separate cards.
+- [ ] Given two detected persons have cosine distance < `FACE_SIMILARITY_THRESHOLD`, when deduplication runs, then they are merged into one entry whose `appearances` list is the union of both persons' appearances, and whose thumbnail and confidence reflect the higher-confidence detection.
+- [ ] Given automated deduplication runs and two persons are merged, when the person card is displayed, then it shows the appearance count and clip count reflecting the merged data (e.g. "Appears in 3 clips").
+- [ ] Given automated deduplication may miss a match (cosine distance just above threshold), when the user sees separate cards for what appears to be the same person, then they can select multiple person cards (checkbox-style multi-select) so the reel treats any selected person as a match when filtering appearances.
+- [ ] Given multi-select is active, when the user selects two or more person cards, then the reel treats them as a single composite person of interest — any clip containing any selected person qualifies for person-of-interest scene slots.
+- [ ] Given person detection fails for one clip but succeeds for others, when cross-clip deduplication runs, then it operates on only the clips for which detection succeeded and does not block progress.
+
+**Technical Approach:**
+- **Primary fix — automated cross-clip deduplication:** After the `for (const clipId of clip_ids)` loop in `handleDetectPersons` (`workers/worker/index.ts`) and before `setPersons()` is called, add a deduplication pass over `Object.values(allPersons)`. Compare each pair of persons using cosine distance on their `representative_embedding` (already in `detect_persons.py` cluster output — expose it in the JSON output alongside `person_id`). Use the same `FACE_SIMILARITY_THRESHOLD = 0.55` already defined in `detect_persons.py`. Merge pairs below the threshold: union their `appearances` arrays, keep the entry with the higher `confidence`, discard the lower-confidence duplicate.
+- **Secondary fix — multi-select UI fallback:** On the person-selection page, replace single-select (one clickable card at a time) with checkbox-style multi-select. The `selectedPersonId: string | null` field in session state becomes `selectedPersonIds: string[]`. Scene selection in `scene-selection.ts` already looks up appearances by `person_id`; extend it to union appearances across all selected IDs before filling phrase slots.
+- To enable cross-clip embedding comparison, `detect_persons.py` must include `representative_embedding` in its JSON output per cluster. The worker already receives the full JSON; the embedding should be stored transiently in the worker (not persisted to Redis) and used only during the deduplication pass, then discarded before `setPersons()` writes to Redis.
+- Greedy nearest-neighbour merging (matching the approach in `cluster_detections()`) is sufficient — no scipy/sklearn dependency needed.
+
+**Out of Scope:** Named person profiles or persistent cross-session face recognition; manual drag-to-merge UI (multi-select covers the fallback case adequately for MVP); merging more than two persons in a single pass (iterative merging covers this naturally); any change to `FACE_SIMILARITY_THRESHOLD` value.
+
+**Open Questions:**
+- Should the merged person card inherit the thumbnail from the higher-confidence detection, or should the user be able to see a representative sample from each source clip? (Suggested: higher-confidence thumbnail — simpler implementation, adequate for MVP.)
+- Is there a maximum number of persons that can be selected in multi-select mode? (Suggested: no hard limit — session clips cap at 10 so the practical upper bound is already small.)
+
+**Size:** M  **Priority:** P1  **Sprint:** MVP
+
+---
+
+### [STORY-027] All Uploaded Clips Contribute Footage to the Reel
+
+**User Story:** As a user, I want my reel to draw footage from all the clips I uploaded, not just the clip where my person of interest appears, so that the reel feels varied and uses all the source material I provided.
+
+**Acceptance Criteria:**
+- [ ] Given the user has uploaded 6 clips and selected a person of interest who appears in only 1 of them, when the reel is generated, then all 6 clips contribute at least one scene to the final reel.
+- [ ] Given a person of interest is selected, when the EDL is built, then phrase slots that contain person-of-interest appearances must not consume more than 70% of the total phrase slots — the remaining 30% or more must be filled via the round-robin fallback that cycles through all ready clips.
+- [ ] Given no person of interest is selected, when the reel is generated, then footage is drawn from all ready clips in round-robin order, identical to the current fallback behavior.
+- [ ] Given the user has uploaded clips of different durations, when the round-robin fallback assigns clip segments, then each clip receives a number of phrase slots proportional to its duration relative to the total duration of all ready clips (longer clips contribute more slots, not just one token slot).
+- [ ] Given a clip has marked highlights, when the EDL is built, then its highlights are still guaranteed in the output regardless of how many person-of-interest slots have been allocated.
+- [ ] Given the generated reel is downloaded, when its source clips are identified via metadata or visual inspection, then footage from every uploaded clip appears at least once.
+
+**Technical Approach:**
+The root cause is that `buildEdl` in `scene-selection.ts` greedily assigns phrase slots to person-of-interest appearances until `personAppearances` is exhausted, then falls back to round-robin. When the selected person has many detected appearances (e.g. a clip sampled every 500 ms produces many entries), all phrase slots fill with person-of-interest scenes before the fallback can run. Non-person clips receive zero slots.
+
+Fix: Before the phrase-slot loop in `buildEdl`, compute a `maxPersonSlots` cap equal to `Math.floor(effectivePhrases.length * 0.7)`. Maintain a `personSlotsUsed` counter. In the person-of-interest branch, only assign a person slot if `personSlotsUsed < maxPersonSlots`; otherwise fall through to the round-robin path. This guarantees at least 30% of phrase slots go to the round-robin, ensuring all clips contribute footage.
+
+Additionally, the round-robin fallback should weight clip selection by duration: instead of a simple modulo cursor, build a weighted pool where each clip contributes slots proportional to `clip.duration_ms / totalDurationMs * remainingSlots`. This ensures long clips don't crowd out short ones and vice versa.
+
+**Out of Scope:** User-controlled per-clip weighting or slot allocation; a UI toggle to switch between "person priority" and "equal distribution" modes (the 70/30 split is the fixed MVP behavior); changing how highlight segments are guaranteed (STORY-005 behavior is unchanged).
+
+**Open Questions:**
+- Is 70% the right ceiling for person-of-interest slots, or should it be configurable via an environment variable? (Suggested: hardcode 70% for MVP, extract to a named constant `MAX_PERSON_SLOT_FRACTION = 0.7` for future tunability.)
+- Should clips with detection failures still participate in the round-robin, or only clips with `status === "ready"`? (The existing filter `readyClips = clips.filter(c => c.status === "ready")` already handles this — no change needed.)
+
+**Size:** S  **Priority:** P1  **Sprint:** MVP
+
+---
+
+### [STORY-028] Expand Person Thumbnail Crop to Show Head and Upper Body
+
+**User Story:** As a user, I want each detected person card to show a wider thumbnail with the person's head and shoulders — not just a tight face crop — so that I can easily tell who each detected person is before selecting one.
+
+**Acceptance Criteria:**
+- [ ] Given person detection completes for a clip, when person thumbnails are saved, then each thumbnail shows the full head, neck, and approximate shoulder area rather than a crop tightly bounded by the detected face bounding box.
+- [ ] Given the expanded crop would extend beyond the frame boundary, when the thumbnail is generated, then the crop is clamped to the frame dimensions so no out-of-bounds slice is taken.
+- [ ] Given a very small face detected near an edge of the frame, when the expanded crop is clamped, then the clamped thumbnail is still saved (no error, no placeholder).
+- [ ] Given the expansion is applied, when thumbnails are rendered on the person-selection page, then faces are visibly larger and accompanied by surrounding context (neck, shoulders, background) compared to the current tight-face crop.
+- [ ] Given the expansion multiplier is 2.5× the face bounding box width and height (centered on the face center), when the crop is computed, then the resulting image is approximately 2.5× wider and 2.5× taller than the raw face bbox before clamping.
+
+**Technical Approach:**
+The change is entirely in `detect_persons.py`. Currently, the face crop stored as `best_crop` is computed inline during `detect_faces_in_frames()` at line 187:
+
+```python
+crop = bgr_frame[y1c:y2c, x1c:x2c]
+```
+
+This crops exactly the face bounding box with only basic clamping. Replace this with an expanded crop using a `THUMBNAIL_PADDING_FACTOR = 2.5` constant:
+
+1. Compute the face center: `cx = (x1 + x2) / 2`, `cy = (y1 + y2) / 2`.
+2. Compute expanded half-dimensions: `hw = (x2 - x1) * THUMBNAIL_PADDING_FACTOR / 2`, `hh = (y2 - y1) * THUMBNAIL_PADDING_FACTOR / 2`.
+3. Compute expanded bbox: `ex1 = cx - hw`, `ey1 = cy - hh`, `ex2 = cx + hw`, `ey2 = cy + hh`.
+4. Clamp to frame bounds: `ex1 = max(0, int(ex1))`, `ey1 = max(0, int(ey1))`, `ex2 = min(fw, int(ex2))`, `ey2 = min(fh, int(ey2))`.
+5. Slice: `crop = bgr_frame[ey1:ey2, ex1:ex2]`.
+
+Define `THUMBNAIL_PADDING_FACTOR = 2.5` in the constants section alongside `FACE_SIMILARITY_THRESHOLD`. The `save_thumbnail()` function and all downstream code (worker thumbnail upload, MinIO storage, presigned URL generation) require no changes — only the crop geometry changes.
+
+**Out of Scope:** Changing the JPEG quality setting in `save_thumbnail()`; resizing or normalizing thumbnail dimensions to a fixed pixel size; applying the expansion to the `bbox` field in the JSON output (the bbox should continue to reflect the raw InsightFace detection, not the expanded thumbnail crop).
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P1  **Sprint:** MVP
 
 ---
 
