@@ -19,8 +19,10 @@ import {
   confirmAudioUpload,
   uploadFileToStorage,
   createSession,
+  getSession,
+  ApiError,
 } from "@/lib/api";
-import { getStoredSessionId, storeSessionId } from "@/lib/session";
+import { getStoredSessionId, storeSessionId, clearSessionId } from "@/lib/session";
 import { validateVideoFile, validateAudioFile } from "@/lib/validation";
 import { MAX_CLIPS, ACCEPTED_VIDEO_EXTENSIONS, ACCEPTED_AUDIO_EXTENSIONS } from "@/lib/env";
 import type { FileUploadEntry, UploadState, AudioTrack } from "@/types";
@@ -61,13 +63,30 @@ export default function UploadPage() {
   const [showReplaceAudioModal, setShowReplaceAudioModal] = useState(false);
   const [pendingAudioFile, setPendingAudioFile] = useState<File | null>(null);
 
-  // Initialize or retrieve session
+  // Initialize or retrieve session, validating that the stored ID still exists.
+  // After a container restart Redis is wiped — the stale ID causes 404s on every
+  // upload. When validation returns 404/410 we clear localStorage and start fresh.
   const ensureSession = useCallback(async (): Promise<string> => {
     if (sessionIdRef.current) return sessionIdRef.current;
     const stored = getStoredSessionId();
     if (stored) {
-      sessionIdRef.current = stored;
-      return stored;
+      try {
+        await getSession(stored);
+        // Session still alive in the backend.
+        sessionIdRef.current = stored;
+        return stored;
+      } catch (err) {
+        if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+          // Session is gone (backend restart / Redis wipe / TTL expiry).
+          // Clear the stale ID so we create a fresh session below.
+          clearSessionId();
+        } else {
+          // Network error or unexpected server error — use stored ID optimistically
+          // so the upload attempt surfaces the real error to the user.
+          sessionIdRef.current = stored;
+          return stored;
+        }
+      }
     }
     const id = await createSession();
     storeSessionId(id);

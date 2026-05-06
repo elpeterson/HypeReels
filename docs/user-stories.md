@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-019 added)
+> **Last updated:** 2026-05-06 (STORY-020 added)
 
 ---
 
@@ -427,6 +427,31 @@
 - `docker-compose.yml` (`minio-init`): Removed the unreliable `mc cors set` call from the entrypoint; CORS is now handled entirely by the instrumentation hook.
 
 **Out of Scope:** Restricting CORS to specific origins (post-MVP); TLS configuration for MinIO; configuring CORS for a non-MinIO S3 backend; any changes to the presigned URL generation logic.
+
+**Open Questions:** None
+
+**Size:** S  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-020] Fix 404 on Upload After Container Rebuild — Stale localStorage Session ID Not Validated
+
+**User Story:** As a user, I want clip and audio uploads to succeed after the Docker Compose stack is rebuilt so that I am not blocked by a stale session ID from a previous run.
+
+**Acceptance Criteria:**
+- [ ] Given the Docker Compose stack has been stopped and rebuilt (`docker compose down && docker compose build && docker compose up -d`), when the user opens the upload page in a browser that has a session ID stored in `localStorage` from a previous run, then the first upload attempt succeeds (2xx) and does not return 404.
+- [ ] Given `ensureSession()` finds a session ID in `localStorage`, when it calls `GET /api/session/{id}` and the backend returns 404 (session not found) or 410 (session expired), then `ensureSession()` clears the stale ID from `localStorage` via `clearSessionId()` and creates a new session before proceeding.
+- [ ] Given `ensureSession()` finds a session ID in `localStorage`, when the validation request to `GET /api/session/{id}` returns 2xx, then `ensureSession()` uses the stored ID without creating a new session (no behavior change for valid sessions).
+- [ ] Given `ensureSession()` finds a session ID in `localStorage`, when the validation request fails with a network error or unexpected non-404/410 status, then `ensureSession()` uses the stored ID optimistically and allows the subsequent upload to surface any real error to the user.
+- [ ] Given the fix is applied, when the operator runs `docker compose down && docker compose build && docker compose up -d` and immediately uploads a clip, then the upload succeeds on the first attempt with no manual intervention (no clearing of `localStorage`, no hard refresh).
+
+**Root Cause (fixed):** `ensureSession()` in the upload page trusted the session ID stored in `localStorage` without validating it against the backend. HypeReels sessions are ephemeral UUID tokens persisted only in Redis. When containers are rebuilt, Redis data is wiped and all sessions are gone. The stale session ID from the previous run was sent as `X-Session-Id` on every upload request. The backend correctly returned 404 (`sessionNotFound()`) because the session no longer existed. The frontend interpreted this as a generic 404 error rather than a recoverable "session gone, create a new one" state.
+
+**Fixes applied:**
+- `upload/page.tsx`: Updated `ensureSession()` to validate the stored session ID against the backend (`GET /api/session/{id}`) before using it. If validation returns 404 or 410, `clearSessionId()` is called and the function falls through to create a new session. Network errors and unexpected statuses use the stored ID optimistically.
+- Added `getSession` and `ApiError` imports from `@/lib/api`, and `clearSessionId` import from `@/lib/session` (function already existed, just wasn't imported in this file).
+
+**Out of Scope:** Changing session persistence from Redis to a durable store; adding session reconnection logic for any route family other than the upload page `ensureSession()` call; modifying the backend session TTL or expiry behavior.
 
 **Open Questions:** None
 
