@@ -286,4 +286,39 @@
 
 ---
 
+### [STORY-014] Fix BullMQ Job Options Type
+
+**User Story:** As a developer, I want the queue configuration to use only valid BullMQ `JobsOptions` fields so that the TypeScript build succeeds and jobs are enqueued without type errors.
+
+**Acceptance Criteria:**
+- [ ] Given the frontend or backend is built via `npm run build`, when the build runs, then no TypeScript error is reported for an unknown `timeout` property on any `JobsOptions` object in `src/lib/queue.ts`.
+- [ ] Given the `timeout` field has been removed from all `JobsOptions` objects in `src/lib/queue.ts`, when jobs are enqueued, then they are accepted by BullMQ without runtime errors and worker-level `lockDuration` continues to enforce the intended timeout behaviour.
+- [ ] Given a new `JobsOptions` object is added to `src/lib/queue.ts` in the future, when `npm run build` runs, then the TypeScript compiler rejects any field not present in BullMQ's `JobsOptions` type, preventing regression.
+
+**Out of Scope:** Changing BullMQ worker configuration; altering job retry or backoff settings; adding per-job timeout support via a different mechanism (post-MVP).
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-015] Catch TypeScript Errors Before Docker Build
+
+**User Story:** As a developer, I want the CI pipeline to run the Next.js production build before the Docker build step so that TypeScript errors are caught in seconds rather than after a full Docker build.
+
+**Acceptance Criteria:**
+- [ ] Given a pull request or push to a tracked branch, when the CI `test` job runs, then `npm run build` (which executes `tsc` + lint) is executed as a step before the `docker buildx build` step, and a TypeScript error in any frontend source file causes the `test` job to fail immediately.
+- [ ] Given `npm run build` fails due to a TypeScript error, when CI reports the failure, then the Docker build step is skipped entirely and the error output from `tsc` is visible in the CI log without requiring the operator to inspect a Docker build log.
+- [ ] Given `npm run build` succeeds with no type errors, when CI continues, then the `docker buildx build` step runs as before and the overall pipeline behaviour is unchanged.
+- [ ] Given three prior Docker build failures caused by TypeScript errors that `npm test` did not catch, when the fix is applied, then the same class of error (e.g. unknown property on a typed object) is caught by the `npm run build` step in under 60 seconds of CI time.
+
+**Out of Scope:** Replacing Docker build with a build-only step; running `tsc --noEmit` as a separate step (redundant — `next build` already invokes the compiler); changing the Docker build configuration; enforcing stricter `tsconfig` settings beyond what already exists.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P1  **Sprint:** MVP
+
+---
+
 > **Next step:** Stories ready in docs/user-stories.md. Invoke @architect.
