@@ -4,7 +4,8 @@
  * Mark a clip as ready after the browser has finished uploading directly to MinIO.
  * Enqueues the thumbnail-extract job.
  *
- * Body (JSON): { session_id: string, object_key: string }
+ * Header: X-Session-Id: string (session_id)
+ * Body: (none required)
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -32,19 +33,10 @@ export async function POST(
   try {
     const { clip_id } = params;
 
-    let body: { session_id?: unknown; object_key?: unknown };
-    try {
-      body = await req.json();
-    } catch {
-      return unprocessable("invalid_json", "Request body must be valid JSON");
-    }
-
-    const { session_id, object_key } = body;
-    if (!session_id || typeof session_id !== "string") {
-      return unprocessable("missing_session_id", "session_id is required");
-    }
-    if (!object_key || typeof object_key !== "string") {
-      return unprocessable("missing_object_key", "object_key is required");
+    // session_id comes from the X-Session-Id header (set by apiFetch)
+    const session_id = req.headers.get("X-Session-Id");
+    if (!session_id) {
+      return unprocessable("missing_session_id", "X-Session-Id header is required");
     }
 
     const session = await getSession(session_id);
@@ -68,11 +60,11 @@ export async function POST(
     // Mark clip as ready
     await updateClipInSession(session_id, clip_id, { status: "ready" });
 
-    // Enqueue thumbnail extraction (async)
+    // Enqueue thumbnail extraction (async); object_key was stored when the clip was created
     const jobId = await enqueueThumbnailExtract({
       session_id,
       clip_id,
-      object_key,
+      object_key: clip.object_key,
     });
 
     return NextResponse.json({ clip_id, job_id: jobId });

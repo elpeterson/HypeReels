@@ -27,6 +27,24 @@ import type {
 // Internal helpers
 // ─────────────────────────────────────────────
 
+/** Derive MIME type from filename extension when file.type is empty (common on macOS drag-and-drop). */
+function resolveMimeType(file: File): string {
+  if (file.type) return file.type;
+  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+  const fallbacks: Record<string, string> = {
+    mp4: "video/mp4",
+    mov: "video/quicktime",
+    mkv: "video/x-matroska",
+    webm: "video/webm",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    aac: "audio/aac",
+    flac: "audio/flac",
+    m4a: "audio/x-m4a",
+  };
+  return fallbacks[ext] ?? "";
+}
+
 function getSessionId(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("hypereels_session_id");
@@ -173,8 +191,9 @@ export async function requestClipUploadUrl(
   sessionId: string,
   filename: string,
   sizeBytes: number,
-  contentType: string
+  file: File
 ): Promise<PresignedUploadResponse> {
+  const contentType = resolveMimeType(file);
   return apiFetch<PresignedUploadResponse>("/api/upload/clip", {
     method: "POST",
     sessionId,
@@ -224,8 +243,9 @@ export async function requestAudioUploadUrl(
   sessionId: string,
   filename: string,
   sizeBytes: number,
-  contentType: string
+  file: File
 ): Promise<PresignedUploadResponse> {
+  const contentType = resolveMimeType(file);
   return apiFetch<PresignedUploadResponse>("/api/upload/audio", {
     method: "POST",
     sessionId,
@@ -285,7 +305,7 @@ export function uploadFileToStorage(
     };
 
     xhr.open("PUT", presignedUrl);
-    xhr.setRequestHeader("Content-Type", file.type);
+    xhr.setRequestHeader("Content-Type", resolveMimeType(file));
     xhr.send(file);
   });
 }

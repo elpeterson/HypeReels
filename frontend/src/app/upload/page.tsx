@@ -90,7 +90,7 @@ export default function UploadPage() {
           sessionId,
           file.name,
           file.size,
-          file.type
+          file
         );
 
         if (!clip_id) {
@@ -224,7 +224,7 @@ export default function UploadPage() {
           sessionId,
           file.name,
           file.size,
-          file.type
+          file
         );
 
         await uploadFileToStorage(upload_url, file, (pct) => {

@@ -24,6 +24,7 @@ export interface Clip {
   filename: string;
   duration_ms: number;
   size_bytes: number;
+  object_key: string;
   thumbnail_key: string | null;
   thumbnail_url: string | null;
   status: ClipStatus;

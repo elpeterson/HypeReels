@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-05 (STORY-016 added)
+> **Last updated:** 2026-05-06 (STORY-017 added)
 
 ---
 
@@ -338,6 +338,36 @@
 **Open Questions:** None
 
 **Size:** S  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-017] Fix 422 on All Clip and Audio Upload Endpoints
+
+**User Story:** As a user, I want uploading clips and audio to work reliably so that I am not blocked from starting reel generation by silent session errors.
+
+**Acceptance Criteria:**
+- [ ] Given the user selects one or more valid clip files, when the frontend initiates a clip upload, then `POST /api/upload/clip` returns a presigned URL (2xx) and does not return 422 with `missing_session_id`.
+- [ ] Given a clip upload to S3 has completed, when the frontend confirms the upload, then `POST /api/upload/clip/[clip_id]/complete` returns success (2xx) without requiring `object_key` in the request body.
+- [ ] Given the user removes an uploaded clip, when the frontend sends the deletion request, then `DELETE /api/upload/clip/[clip_id]` deletes the correct S3 object and returns success (2xx) without returning 422.
+- [ ] Given the user selects a valid audio file, when the frontend initiates an audio upload, then `POST /api/upload/audio` returns a presigned URL (2xx) and does not return 422 with `missing_session_id`.
+- [ ] Given an audio upload to S3 has completed, when the frontend confirms the upload, then `POST /api/upload/audio/complete` returns success (2xx) without requiring `audio_id` in the request body.
+- [ ] Given the user is on macOS and drags and drops a clip or audio file onto the upload area, when the file is processed, then the upload proceeds with the correct MIME type even if `file.type` is an empty string (extension-based fallback is used).
+- [ ] Given any of the five upload routes receive a request, when the session ID is extracted, then it is read from the `X-Session-Id` HTTP header (not the request body), consistent with how `apiFetch` sends it.
+
+**Root Cause (fixed):** All five upload route handlers read `session_id` from the JSON request body; the frontend `apiFetch` helper sends it exclusively as the `X-Session-Id` header. Every upload request therefore received `session_id: undefined` and was rejected with 422. Secondary issues: `confirmClipUpload` sent no body (route needed `object_key`); `confirmAudioUpload` sent no body (route needed `audio_id`); `file.type` could be empty on macOS drag-and-drop.
+
+**Fixes applied:**
+- All five backend routes now read `session_id` from `req.headers.get("X-Session-Id")`.
+- `object_key` is stored on the `Clip` record in Redis at upload-initiation time; the `/complete` handler looks it up from there.
+- `audio_id` is derived from `session.audio.audio_id` in the audio complete handler — no body field required.
+- `requestClipUploadUrl` and `requestAudioUploadUrl` accept a `File` object and call `resolveMimeType(file)`, which falls back to extension-based MIME lookup when `file.type` is empty.
+- `DELETE /api/upload/clip/[clip_id]` uses `clip.object_key` from the stored record rather than reconstructing it from the filename extension.
+
+**Out of Scope:** Changing the session ID transport mechanism for any other route family; resumable or chunked upload protocols; any change to S3 presigned URL generation logic beyond the MIME-type fix.
+
+**Open Questions:** None
+
+**Size:** M  **Priority:** P0  **Sprint:** MVP
 
 ---
 

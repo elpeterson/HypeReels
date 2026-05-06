@@ -4,8 +4,9 @@
  * Validate file metadata, issue a presigned PUT URL for browser-to-MinIO
  * direct upload, and register the clip in the session.
  *
+ * Header: X-Session-Id: string (session_id)
+ *
  * Body (JSON):
- *   session_id: string
  *   filename:   string
  *   content_type: string
  *   size_bytes: number
@@ -40,8 +41,13 @@ const ACCEPTED_EXTENSIONS = ["mp4", "mov", "mkv", "webm"];
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
   try {
+    // session_id comes from the X-Session-Id header (set by apiFetch)
+    const session_id = req.headers.get("X-Session-Id");
+    if (!session_id) {
+      return unprocessable("missing_session_id", "X-Session-Id header is required");
+    }
+
     let body: {
-      session_id?: unknown;
       filename?: unknown;
       content_type?: unknown;
       size_bytes?: unknown;
@@ -52,12 +58,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       return unprocessable("invalid_json", "Request body must be valid JSON");
     }
 
-    const { session_id, filename, content_type, size_bytes } = body;
+    const { filename, content_type, size_bytes } = body;
 
     // Validate required fields
-    if (!session_id || typeof session_id !== "string") {
-      return unprocessable("missing_session_id", "session_id is required");
-    }
     if (!filename || typeof filename !== "string") {
       return unprocessable("missing_filename", "filename is required");
     }
@@ -142,6 +145,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       filename,
       duration_ms: 0, // Will be updated after thumbnail extraction
       size_bytes,
+      object_key: objectKey,
       thumbnail_key: null,
       thumbnail_url: null,
       status: "uploading",

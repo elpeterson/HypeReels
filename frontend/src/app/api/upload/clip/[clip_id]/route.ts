@@ -2,13 +2,14 @@
  * DELETE /api/upload/clip/[clip_id]
  *
  * Remove a clip from the session and delete its MinIO object.
- * Body (JSON): { session_id: string }
+ * Header: X-Session-Id: string (session_id)
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSession, removeClipFromSession } from "../../../../../lib/redis";
 import { deleteObject, objectKeys } from "../../../../../lib/storage";
 import {
+  errorResponse,
   sessionNotFound,
   sessionExpired,
   notFound,
@@ -28,27 +29,12 @@ export async function DELETE(
   try {
     const { clip_id } = params;
 
-    let body: { session_id?: unknown };
-    try {
-      body = await req.json();
-    } catch {
-      // Also check query param
-      const url = new URL(req.url);
-      body = { session_id: url.searchParams.get("session_id") ?? undefined };
+    // session_id comes from the X-Session-Id header (set by apiFetch)
+    const sessionId = req.headers.get("X-Session-Id");
+    if (!sessionId) {
+      return errorResponse(422, "missing_session_id", "X-Session-Id header is required");
     }
 
-    const session_id =
-      typeof body.session_id === "string" ? body.session_id : null;
-    if (!session_id) {
-      const url = new URL(req.url);
-      const qs = url.searchParams.get("session_id");
-      if (!qs) {
-        const { errorResponse } = await import("../../../../../lib/errors");
-        return errorResponse(422, "missing_session_id", "session_id is required");
-      }
-    }
-
-    const sessionId = session_id!;
     const session = await getSession(sessionId);
     if (!session) return sessionNotFound();
     if (
@@ -67,8 +53,8 @@ export async function DELETE(
     await removeClipFromSession(sessionId, clip_id);
 
     // Delete MinIO objects (best-effort; log failures but don't surface to user)
-    const ext = clip.filename.split(".").pop()?.toLowerCase() ?? "mp4";
-    const clipKey = objectKeys.clip(sessionId, clip_id, ext);
+    // object_key was stored when the clip was created; thumbnail may not exist yet
+    const clipKey = clip.object_key;
     const thumbKey = objectKeys.thumbnail(sessionId, clip_id);
 
     const deletePromises = [
