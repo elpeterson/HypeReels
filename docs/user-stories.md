@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-021 added)
+> **Last updated:** 2026-05-06 (STORY-022 added)
 
 ---
 
@@ -482,6 +482,29 @@
 **Open Questions:** None
 
 **Size:** S  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-022] Fix "b.map is not a function" Crash on Person-Selection Page
+
+**User Story:** As a user, I want the person-selection page to render correctly after detection completes so that I can select a person of interest without encountering a full-screen crash.
+
+**Acceptance Criteria:**
+- [ ] Given person detection has completed, when the browser navigates to `/person-selection`, then the page renders without a full-screen error and no "b.map is not a function" (or equivalent) runtime error appears.
+- [ ] Given person detection completed and no persons were found, when the person-selection page renders, then the "no persons found" empty state UI is shown and the user can continue without selecting a person of interest.
+- [ ] Given person detection completed and one or more persons were found, when the person-selection page renders, then a card is displayed for each detected person and the user can select one.
+- [ ] Given the person-selection page is loaded, when the browser console is inspected, then no runtime type errors are present (no "is not a function", "cannot read properties of undefined", or similar errors related to the persons data).
+
+**Root Cause (fixed):** `GET /api/session/{id}/persons` returns `{ persons: Person[] }` (an object wrapper). `getSessionPersons()` in `src/lib/api.ts` typed the response as `Person[]` (bare array) and returned the raw response object without unwrapping it. The person-selection page called `.length` and `.map()` directly on `{ persons: [...] }` rather than on the inner array. In the minified production bundle this surfaced as `b.map is not a function`.
+
+**Fixes applied:**
+- `src/lib/api.ts`: Changed `getSessionPersons()` to type the response as `{ persons: Person[] }` and return `data.persons ?? []`. The `?? []` fallback guards against an unexpectedly absent key.
+
+**Out of Scope:** Changes to the backend persons endpoint response shape; changes to any other API helper functions; UI redesign of the person-selection page.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P0  **Sprint:** MVP
 
 ---
 

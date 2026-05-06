@@ -350,19 +350,17 @@ export async function getJobProgress(
 /**
  * GET /api/session/{id}/persons
  * Returns detected persons for the session after detection completes.
- *
- * @api_issues [UNVERIFIED] This endpoint is NOT listed in architecture.md §6.
- * Derived from data flow §4.2 which states "polls GET /api/session/{id}/persons".
- * Backend engineer must confirm this endpoint exists and its response shape.
+ * API response shape: { persons: Person[] }
  */
 export async function getSessionPersons(
   sessionId: string,
   signal?: AbortSignal
 ): Promise<Person[]> {
-  return apiFetch<Person[]>(`/api/session/${sessionId}/persons`, {
-    sessionId,
-    signal,
-  });
+  const data = await apiFetch<{ persons: Person[] }>(
+    `/api/session/${sessionId}/persons`,
+    { sessionId, signal }
+  );
+  return data.persons ?? [];
 }
 
 /**
