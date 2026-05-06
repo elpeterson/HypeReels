@@ -2,10 +2,11 @@
  * BullMQ queue definitions and job enqueue helpers.
  *
  * All queues share the same Redis connection.
- * Job timeouts are pulled from config (never hardcoded).
+ * Note: BullMQ does not support per-job timeouts via JobsOptions.
+ * Timeouts are enforced at the Worker level via lockDuration.
  */
 
-import { Queue, QueueEvents } from "bullmq";
+import { Queue } from "bullmq";
 import { config } from "./config";
 
 // ─── Connection options ───────────────────────────────────────────────────────
@@ -27,7 +28,7 @@ export const QUEUE_CLEANUP = "cleanup-session";
 
 // ─── Queue singletons ─────────────────────────────────────────────────────────
 
-let _queues: Map<string, Queue> = new Map();
+const _queues: Map<string, Queue> = new Map();
 
 function getQueue(name: string): Queue {
   if (!_queues.has(name)) {
@@ -74,7 +75,6 @@ export async function enqueueThumbnailExtract(
   const job = await queue.add("thumbnail-extract", data, {
     attempts: 3,
     backoff: { type: "exponential", delay: 5000 },
-    timeout: config.worker.timeouts.thumbnailExtractMs,
     removeOnComplete: 100,
     removeOnFail: 50,
   });
@@ -88,7 +88,6 @@ export async function enqueueDetectPersons(
   const job = await queue.add("detect-persons", data, {
     attempts: 2,
     backoff: { type: "exponential", delay: 10000 },
-    timeout: config.worker.timeouts.detectPersonsMs,
     removeOnComplete: 100,
     removeOnFail: 50,
   });
@@ -102,7 +101,6 @@ export async function enqueueAnalyzeAudio(
   const job = await queue.add("analyze-audio", data, {
     attempts: 2,
     backoff: { type: "exponential", delay: 10000 },
-    timeout: config.worker.timeouts.analyzeAudioMs,
     removeOnComplete: 100,
     removeOnFail: 50,
   });
@@ -114,20 +112,12 @@ export async function enqueueGenerateReel(
   dependsOnJobId?: string
 ): Promise<string> {
   const queue = getQueue(QUEUE_GENERATE_REEL);
-
-  const jobOptions: Record<string, unknown> = {
+  const job = await queue.add("generate-reel", data, {
     attempts: 1,
-    timeout: config.worker.timeouts.generateReelMs,
     removeOnComplete: 100,
     removeOnFail: 50,
-  };
-
-  // BullMQ job dependencies: generate-reel waits for analyze-audio to finish
-  if (dependsOnJobId) {
-    jobOptions.depends_on = [dependsOnJobId];
-  }
-
-  const job = await queue.add("generate-reel", data, jobOptions as Parameters<Queue["add"]>[2]);
+    ...(dependsOnJobId && { depends_on: [dependsOnJobId] }),
+  });
   return job.id!;
 }
 
@@ -140,7 +130,6 @@ export async function enqueueCleanup(
     delay: delayMs,
     attempts: 3,
     backoff: { type: "exponential", delay: 5000 },
-    timeout: config.worker.timeouts.cleanupMs,
     removeOnComplete: 100,
     removeOnFail: 50,
   });
