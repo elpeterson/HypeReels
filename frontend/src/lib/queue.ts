@@ -6,7 +6,7 @@
  * Timeouts are enforced at the Worker level via lockDuration.
  */
 
-import { Queue } from "bullmq";
+import { Queue, FlowProducer } from "bullmq";
 import { config } from "./config";
 
 // ─── Connection options ───────────────────────────────────────────────────────
@@ -37,6 +37,15 @@ function getQueue(name: string): Queue {
   return _queues.get(name)!;
 }
 
+let _flow: FlowProducer | null = null;
+
+function getFlowProducer(): FlowProducer {
+  if (!_flow) {
+    _flow = new FlowProducer({ connection });
+  }
+  return _flow;
+}
+
 // ─── Job payload types ────────────────────────────────────────────────────────
 
 export interface ThumbnailExtractJobData {
@@ -58,7 +67,6 @@ export interface AnalyzeAudioJobData {
 
 export interface GenerateReelJobData {
   session_id: string;
-  analyze_audio_job_id: string;
 }
 
 export interface CleanupSessionJobData {
@@ -107,18 +115,53 @@ export async function enqueueAnalyzeAudio(
   return job.id!;
 }
 
-export async function enqueueGenerateReel(
-  data: GenerateReelJobData,
-  dependsOnJobId?: string
-): Promise<string> {
-  const queue = getQueue(QUEUE_GENERATE_REEL);
-  const job = await queue.add("generate-reel", data, {
-    attempts: 1,
-    removeOnComplete: 100,
-    removeOnFail: 50,
-    ...(dependsOnJobId && { depends_on: [dependsOnJobId] }),
+/**
+ * Enqueue the analyze-audio → generate-reel flow using BullMQ FlowProducer.
+ *
+ * FlowProducer creates a parent→child dependency: the parent (generate-reel)
+ * remains in "waiting-children" state until all children (analyze-audio)
+ * complete successfully. This replaces the previous `depends_on` option which
+ * is NOT a valid BullMQ API and was silently ignored, causing generate-reel to
+ * start in parallel with analyze-audio and fail because analysis.json didn't
+ * exist yet.
+ *
+ * Returns both job IDs. The caller returns `generateJobId` to the frontend
+ * for progress polling.
+ */
+export async function enqueueReelGenerationFlow(
+  analyzeData: AnalyzeAudioJobData,
+  generateData: GenerateReelJobData
+): Promise<{ analyzeJobId: string; generateJobId: string }> {
+  const flow = getFlowProducer();
+
+  const added = await flow.add({
+    name: "generate-reel",
+    queueName: QUEUE_GENERATE_REEL,
+    data: generateData,
+    opts: {
+      attempts: 1,
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    },
+    children: [
+      {
+        name: "analyze-audio",
+        queueName: QUEUE_ANALYZE_AUDIO,
+        data: analyzeData,
+        opts: {
+          attempts: 2,
+          backoff: { type: "exponential", delay: 10000 },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        },
+      },
+    ],
   });
-  return job.id!;
+
+  const generateJobId = added.job.id!;
+  const analyzeJobId = added.children![0].job.id!;
+
+  return { analyzeJobId, generateJobId };
 }
 
 export async function enqueueCleanup(

@@ -20,8 +20,7 @@ import {
   setJobProgress,
 } from "../../../../lib/redis";
 import {
-  enqueueAnalyzeAudio,
-  enqueueGenerateReel,
+  enqueueReelGenerationFlow,
 } from "../../../../lib/queue";
 import {
   sessionNotFound,
@@ -89,20 +88,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Enqueue analyze-audio first
-    const analyzeJobId = await enqueueAnalyzeAudio({
-      session_id,
-      audio_id: session.audio.audio_id,
-      object_key: session.audio.object_key,
-    });
-
-    // Enqueue generate-reel with dependency on analyze-audio
-    const generateJobId = await enqueueGenerateReel(
+    // Enqueue analyze-audio → generate-reel as a BullMQ flow.
+    // generate-reel stays in "waiting-children" state until analyze-audio
+    // completes; only then does it become active. This guarantees analysis.json
+    // is in MinIO before generate-reel tries to read it.
+    const { analyzeJobId, generateJobId } = await enqueueReelGenerationFlow(
       {
         session_id,
-        analyze_audio_job_id: analyzeJobId,
+        audio_id: session.audio.audio_id,
+        object_key: session.audio.object_key,
       },
-      analyzeJobId
+      { session_id }
     );
 
     // Update session state to generating

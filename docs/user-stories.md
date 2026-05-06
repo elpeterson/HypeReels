@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-024 added)
+> **Last updated:** 2026-05-06 (STORY-025 added)
 
 ---
 
@@ -564,6 +564,31 @@ Bug 2 — Thumbnail path mismatch:
 **Open Questions:** None
 
 **Size:** XS  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-025] Fix Download 409 — generate-reel Starts Before analyze-audio Finishes, Leaving Session Stuck in "Generating" State
+
+**User Story:** As a user, I want reel generation to reliably wait for audio analysis to finish before starting so that I reach the download page with a working download button instead of a 409 error.
+
+**Acceptance Criteria:**
+- [ ] Given the user has completed person selection and highlight marking and triggers reel generation, when app logs are examined, then `[analyze-audio] done` appears before any `[generate-reel]` log entry.
+- [ ] Given reel generation is in progress, when it completes, then session state reaches "ready" and the download page shows a working download button with no 409 Conflict error.
+- [ ] Given reel generation completes successfully, when app logs are examined, then no "The specified key does not exist" (S3 NoSuchKey) errors appear in generate-reel logs.
+- [ ] Given reel generation is triggered, when `POST /api/jobs/generate-reel` is called, then both `generateJobId` and `analyzeJobId` are returned in the response for frontend polling and observability.
+
+**Root Cause (fixed):** `POST /api/jobs/generate-reel` was intended to enqueue analyze-audio first and then enqueue generate-reel with a job dependency so it would wait for audio analysis to complete. The dependency was implemented as `depends_on: [analyzeJobId]` in BullMQ's `queue.add()` options — this is not a valid BullMQ option and is silently ignored. Both jobs started immediately in parallel. generate-reel called `getObjectBuffer(objectKeys.analysis(session_id))` before `analyze_audio.py` had written `analysis.json` to MinIO, producing an S3 NoSuchKey error ("The specified key does not exist"). generate-reel failed and set session state to "failed" (not "ready"). The frontend progress poller received "completed" from analyze-audio finishing and navigated to `/download`. The download route checked `session.state !== "ready"` and returned 409 Conflict.
+
+**Fixes applied:**
+- Replaced the invalid `depends_on` option with BullMQ's `FlowProducer` API. `enqueueReelGenerationFlow()` creates a parent→child flow where generate-reel (parent) waits for analyze-audio (child) to complete before becoming active.
+- Removed `analyze_audio_job_id` from `GenerateReelJobData` (no longer needed as an explicit field since the dependency is now enforced by the flow).
+- `POST /api/jobs/generate-reel` now returns both `generateJobId` and `analyzeJobId`; the frontend continues to use `generateJobId` for progress polling.
+
+**Out of Scope:** Changes to the audio analysis or reel generation pipeline logic; changes to session state transitions beyond the generate-reel failure path; frontend progress polling UI changes.
+
+**Open Questions:** None
+
+**Size:** S  **Priority:** P0  **Sprint:** MVP
 
 ---
 
