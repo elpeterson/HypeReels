@@ -14,6 +14,7 @@ import {
   ListObjectsV2Command,
   HeadBucketCommand,
   GetObjectCommand,
+  PutBucketCorsCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "./config";
@@ -232,6 +233,40 @@ export async function putObject(
       ContentType: contentType,
     })
   );
+}
+
+// ─── CORS configuration ───────────────────────────────────────────────────────
+
+/**
+ * Set a permissive CORS policy on the MinIO bucket so browsers can upload
+ * directly via presigned PUT URLs and download via presigned GET URLs.
+ *
+ * Called once at app startup from instrumentation.ts.
+ * MinIO requires explicit CORS configuration — without it cross-origin
+ * PUT/GET requests from the browser will be rejected (NS_ERROR_NET_RESET / CORS error).
+ */
+export async function configureBucketCors(): Promise<void> {
+  const client = getS3Client(); // internal client — server-to-MinIO
+  await client.send(
+    new PutBucketCorsCommand({
+      Bucket: config.minio.bucket,
+      CORSConfiguration: {
+        CORSRules: [
+          {
+            // Allow browser direct uploads (presigned PUT) and downloads (presigned GET)
+            // from any origin. In production you'd restrict AllowedOrigins to your domain.
+            AllowedOrigins: ["*"],
+            AllowedMethods: ["GET", "PUT", "POST", "DELETE", "HEAD"],
+            AllowedHeaders: ["*"],
+            // ETag is required so the browser can confirm the upload succeeded
+            ExposeHeaders: ["ETag"],
+            MaxAgeSeconds: 86400,
+          },
+        ],
+      },
+    })
+  );
+  console.log(`[storage] CORS configured on bucket "${config.minio.bucket}"`);
 }
 
 // ─── Health check ─────────────────────────────────────────────────────────────

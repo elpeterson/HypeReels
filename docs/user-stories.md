@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-018 added)
+> **Last updated:** 2026-05-06 (STORY-019 added)
 
 ---
 
@@ -403,6 +403,34 @@
 **Open Questions:** None
 
 **Size:** M  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-019] Fix NS_ERROR_NET_RESET on Presigned PUT — MinIO Bucket Missing CORS Configuration
+
+**User Story:** As a user, I want presigned PUT uploads to MinIO to succeed from the browser so that uploaded clips and audio are actually stored and reel generation can proceed.
+
+**Acceptance Criteria:**
+- [ ] Given the Docker Compose stack has started and the app service is healthy, when the browser performs a presigned PUT to `http://localhost:9000`, then the request completes with a 2xx response and does not reset the connection (NS_ERROR_NET_RESET or equivalent).
+- [ ] Given a cross-origin presigned PUT is made from the Next.js origin (e.g. `http://localhost:3000`) to MinIO (`http://localhost:9000`), when the browser sends the OPTIONS preflight, then MinIO responds 204, and the subsequent PUT also succeeds rather than being reset.
+- [ ] Given the app service starts, when `instrumentation.ts` runs at startup, then `configureBucketCors()` executes and applies an allow-all CORS policy (`AllowedOrigins: ["*"]`, methods GET/PUT/POST/DELETE/HEAD, all headers, `ExposeHeaders: ETag`, `MaxAgeSeconds: 86400`) to the MinIO bucket.
+- [ ] Given `configureBucketCors()` fails for any reason (e.g. MinIO not yet reachable, permission error), when the error occurs, then it is logged as an error but does not crash the app — the app continues starting normally.
+- [ ] Given CORS is configured at startup via `instrumentation.ts`, when the Docker Compose dependency chain is followed (MinIO starts → `minio-init` creates bucket → app starts), then MinIO is guaranteed to be ready and the bucket guaranteed to exist before `configureBucketCors()` is called.
+- [ ] Given CORS is now configured via `instrumentation.ts`, when `docker-compose.yml` is examined, then the `minio-init` entrypoint contains no `mc cors set` call (it was unreliable across mc versions and has been removed in favor of the instrumentation hook).
+- [ ] Given CORS is correctly configured, when the user completes a clip or audio upload, then the "Continue to Person Selection" button becomes enabled.
+
+**Root Cause (fixed):** MinIO requires an explicit CORS policy on the bucket for cross-origin browser requests. The `minio-init` container created the bucket but did not configure CORS. Without it, cross-origin PUT/GET requests are rejected with a connection reset even though the OPTIONS preflight returned 204. No CORS was configured anywhere in the stack.
+
+**Fixes applied:**
+- `storage.ts`: Added `configureBucketCors()` using `PutBucketCorsCommand` from `@aws-sdk/client-s3`. Applies an allow-all CORS policy on the MinIO bucket.
+- `instrumentation.ts`: Calls `configureBucketCors()` at app startup before the BullMQ worker starts. Wrapped in try/catch — failure logs an error but does not crash the app.
+- `docker-compose.yml` (`minio-init`): Removed the unreliable `mc cors set` call from the entrypoint; CORS is now handled entirely by the instrumentation hook.
+
+**Out of Scope:** Restricting CORS to specific origins (post-MVP); TLS configuration for MinIO; configuring CORS for a non-MinIO S3 backend; any changes to the presigned URL generation logic.
+
+**Open Questions:** None
+
+**Size:** S  **Priority:** P0  **Sprint:** MVP
 
 ---
 
