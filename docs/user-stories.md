@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-05 (STORY-012 added)
+> **Last updated:** 2026-05-05 (STORY-013 added)
 
 ---
 
@@ -261,6 +261,24 @@
 - [ ] Given the repository no longer contains `frontend/next.config.ts`, when any CI pipeline runs `npm run build`, then the build succeeds end-to-end and produces a `.next` output directory.
 
 **Out of Scope:** Upgrading Next.js to version 15 or later; changing any runtime behavior of the Next.js configuration; modifying other frontend build tooling.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-013] Fix Download State Type
+
+**User Story:** As a developer, I want the download page TypeScript type to include all valid states so that the build succeeds and the loading indicator works correctly.
+
+**Acceptance Criteria:**
+- [ ] Given the frontend is built via `npm run build` or `docker compose build`, when the build runs, then no TypeScript error is reported for the comparison `downloadState === "downloading"` on the download page.
+- [ ] Given the reel download is in progress, when the download page renders, then the "Download Reel" button shows its loading state (spinner or disabled indicator) while the download is active.
+- [ ] Given the download has not started or has completed, when the download page renders, then the button does not show a loading state.
+- [ ] Given the `DownloadState` type did not previously include `"downloading"`, when the fix is applied, then no other references to `DownloadState` in the codebase produce new TypeScript errors as a result of the type change.
+
+**Out of Scope:** Changing download UX behavior beyond the loading indicator; modifying the download flow logic; adding new download states beyond those already needed.
 
 **Open Questions:** None
 
