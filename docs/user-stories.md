@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-020 added)
+> **Last updated:** 2026-05-06 (STORY-021 added)
 
 ---
 
@@ -452,6 +452,32 @@
 - Added `getSession` and `ApiError` imports from `@/lib/api`, and `clearSessionId` import from `@/lib/session` (function already existed, just wasn't imported in this file).
 
 **Out of Scope:** Changing session persistence from Redis to a durable store; adding session reconnection logic for any route family other than the upload page `ensureSession()` call; modifying the backend session TTL or expiry behavior.
+
+**Open Questions:** None
+
+**Size:** S  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-021] Fix NS_ERROR_NET_RESET on Presigned PUT — Bucket Never Created Due to Broken minio-init YAML
+
+**User Story:** As a user, I want presigned PUT uploads to MinIO to succeed after a container rebuild so that video clip uploads do not fail immediately with a connection reset.
+
+**Acceptance Criteria:**
+- [ ] Given `docker compose build && docker compose up -d` has completed, when the user uploads a video clip, then the presigned PUT to `http://localhost:9000` completes with a 2xx response and the file appears in MinIO.
+- [ ] Given the app service starts, when `storage.ts` initialises, then app logs show `[storage] CORS configured on bucket "hypereels"` with no `NoSuchBucket` error.
+- [ ] Given the `minio-init` service runs, when its container logs are examined, then there are no "Access Denied" entries from `mc mb` — the bucket is created successfully under the configured credentials.
+- [ ] Given `docker-compose.yml` is examined, when the `minio-init` entrypoint is read, then the `mc alias set` command and its `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` credentials appear on a single YAML line so that YAML folded-scalar folding does not split them into separate shell tokens.
+- [ ] Given `storage.ts` is examined, when the code is read, then an `ensureBucketExists()` function is present that uses `HeadBucketCommand` to check for the bucket and `CreateBucketCommand` to create it if missing, and this function is called before `configureBucketCors()` — making the app self-healing against broken `minio-init` runs.
+- [ ] Given `minio-init` completes (whether successfully or not), when the `app` service starts and calls `ensureBucketExists()`, then the bucket is guaranteed to exist before any presigned URL is issued.
+
+**Root Cause (fixed):** The `minio-init` entrypoint in `docker-compose.yml` used a YAML `>` folded-scalar block. The `mc alias set` credentials were indented more than the command itself; YAML folded-scalar semantics converted those more-indented lines to literal newlines instead of spaces. The shell therefore received `mc alias set local http://minio:9000` (no credentials), then `minioadmin` (unknown command), then `minioadmin;` (unknown command). MinIO set the alias anonymously; `mc mb` failed with Access Denied; the trailing `echo` still exited 0; Docker marked `minio-init` as `service_completed_successfully` even though the bucket was never created. The `app` started, `configureBucketCors()` failed with `NoSuchBucket`, CORS was not applied, and the browser's presigned PUT hit a non-existent bucket, causing MinIO to reset the TCP connection (NS_ERROR_NET_RESET).
+
+**Fixes applied:**
+- `docker-compose.yml` (`minio-init`): Flattened the `mc alias set` command onto a single line so YAML folding treats the credentials as proper positional arguments.
+- `storage.ts`: Added `ensureBucketExists()` using `HeadBucketCommand` and `CreateBucketCommand` from `@aws-sdk/client-s3`. Called before `configureBucketCors()` at app startup, ensuring the bucket exists regardless of whether `minio-init` succeeded.
+
+**Out of Scope:** Changing the MinIO initialisation strategy from a sidecar container to an in-app migration; YAML linting enforcement in CI; restricting CORS to specific origins (post-MVP); non-MinIO S3 backend support.
 
 **Open Questions:** None
 

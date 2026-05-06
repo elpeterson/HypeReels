@@ -13,6 +13,7 @@ import {
   DeleteObjectsCommand,
   ListObjectsV2Command,
   HeadBucketCommand,
+  CreateBucketCommand,
   GetObjectCommand,
   PutBucketCorsCommand,
 } from "@aws-sdk/client-s3";
@@ -238,15 +239,55 @@ export async function putObject(
 // ─── CORS configuration ───────────────────────────────────────────────────────
 
 /**
+ * Ensure the MinIO bucket exists, creating it if necessary.
+ *
+ * minio-init is responsible for bucket creation, but it can fail silently
+ * (YAML folding issues, race conditions, etc.) while still exiting 0.
+ * This makes the app self-healing so a missing bucket never causes silent
+ * NS_ERROR_NET_RESET failures on presigned PUT URLs.
+ */
+async function ensureBucketExists(): Promise<void> {
+  const client = getS3Client();
+
+  try {
+    await client.send(new HeadBucketCommand({ Bucket: config.minio.bucket }));
+    // Bucket exists — nothing to do.
+  } catch (err: unknown) {
+    const code =
+      err instanceof Error && "name" in err ? (err as { name: string }).name : "";
+    if (code === "NotFound" || code === "NoSuchBucket" || code === "404") {
+      console.warn(
+        `[storage] Bucket "${config.minio.bucket}" not found — creating it now`
+      );
+      await client.send(
+        new CreateBucketCommand({ Bucket: config.minio.bucket })
+      );
+      console.log(`[storage] Bucket "${config.minio.bucket}" created`);
+    } else {
+      // Re-throw unexpected errors (auth failure, network issue, etc.)
+      throw err;
+    }
+  }
+}
+
+/**
  * Set a permissive CORS policy on the MinIO bucket so browsers can upload
  * directly via presigned PUT URLs and download via presigned GET URLs.
  *
  * Called once at app startup from instrumentation.ts.
  * MinIO requires explicit CORS configuration — without it cross-origin
  * PUT/GET requests from the browser will be rejected (NS_ERROR_NET_RESET / CORS error).
+ *
+ * Also ensures the bucket exists before configuring CORS, so that a failed
+ * minio-init (which can exit 0 even when `mc mb` fails) doesn't cause
+ * a silent "NoSuchBucket" error that leaves the app in a broken state.
  */
 export async function configureBucketCors(): Promise<void> {
   const client = getS3Client(); // internal client — server-to-MinIO
+
+  // Create bucket if minio-init didn't (or couldn't) do it.
+  await ensureBucketExists();
+
   await client.send(
     new PutBucketCorsCommand({
       Bucket: config.minio.bucket,
