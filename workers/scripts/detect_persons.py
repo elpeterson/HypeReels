@@ -16,10 +16,34 @@ import json
 import os
 import sys
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# stdout guard — InsightFace / ONNX Runtime print to fd 1 (stdout) at the C
+# level during model load, which poisons the JSON output Node.js parses.
+# Python-level sys.stdout reassignment does NOT capture C-level writes; we
+# must redirect the raw file descriptor with os.dup2.
+# ──────────────────────────────────────────────────────────────────────────────
+
+@contextmanager
+def suppress_stdout_fd():
+    """Temporarily redirect fd 1 → /dev/null to silence C-level stdout."""
+    flushed = False
+    old_fd = os.dup(1)
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1)
+        os.close(devnull)
+        flushed = True
+        yield
+    finally:
+        os.dup2(old_fd, 1)
+        os.close(old_fd)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -262,9 +286,12 @@ def main() -> None:
     providers = build_providers()
 
     # ── Load model ──────────────────────────────────────────────────────────
+    # InsightFace / ONNX Runtime emit C-level stdout during model init.
+    # Suppress fd 1 so those messages don't corrupt our JSON output.
     log("Loading InsightFace model…")
     try:
-        model = load_model(providers)
+        with suppress_stdout_fd():
+            model = load_model(providers)
     except Exception as exc:
         print(f"Error loading InsightFace model: {exc}", file=sys.stderr)
         sys.exit(3)

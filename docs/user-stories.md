@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-022 added)
+> **Last updated:** 2026-05-06 (STORY-023 added)
 
 ---
 
@@ -505,6 +505,42 @@
 **Open Questions:** None
 
 **Size:** XS  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-023] Fix Person Detection Always Returning 0 Persons — InsightFace Stdout Pollution and Thumbnail Path Mismatch
+
+**User Story:** As a user, I want the person-selection page to show detected person cards after I upload a video with visible faces so that I can select a person of interest without seeing a "no persons detected" empty state.
+
+**Acceptance Criteria:**
+- [ ] Given a video clip containing visible faces has been uploaded, when person detection completes, then the person-selection page shows one or more detected person cards and does not display the "no persons detected" empty state.
+- [ ] Given person detection completes for a face-containing clip, when the app logs are examined, then they show `[detect-persons] done session=..., persons=N` where N > 0, and no "invalid JSON output" error is present.
+- [ ] Given person detection completes, when person cards are displayed on the person-selection page, then each card's thumbnail image loads correctly and is not broken or missing.
+- [ ] Given the app is running, when the logs are examined during person detection, then no `Detection failed for clip ...: Error: Python script detect_persons.py produced invalid JSON output` entries appear.
+
+**Root Causes (two bugs fixed):**
+
+Bug 1 — InsightFace/ONNX Runtime stdout pollution:
+- `detect_persons.py` correctly routes all log messages through `sys.stderr`, reserving `sys.stdout` for the JSON result only.
+- However, during `model.prepare()`, InsightFace and ONNX Runtime emit approximately 413 bytes directly to the C-level file descriptor 1 (stdout) — messages such as `Applied providers: ['CPUExecutionProvider']`, `find model: .../det_500m.onnx`, and `set det-size: (640, 640)` — bypassing Python-level `sys.stdout` redirection entirely, since only `os.dup2()` can intercept writes at the C file-descriptor level.
+- Node.js collects all bytes written to fd 1 and passes the concatenated string to `JSON.parse()`, which fails because the model-load messages precede the JSON array.
+- Fix: added a `suppress_stdout_fd()` context manager in `detect_persons.py` using `os.dup2` to redirect fd 1 to `/dev/null` for the duration of the `load_model()` call.
+
+Bug 2 — Thumbnail path mismatch:
+- `detect_persons.py` saves face thumbnails to `{tempDir}/persons/{person_id}.jpg` (inside a `persons/` subdirectory).
+- `worker/index.ts` looked for each thumbnail at `{tempDir}/{person_id}.jpg`, omitting the `persons/` subdirectory segment.
+- Every thumbnail upload silently failed (caught by a try/catch that only logged a warning), so no person avatar images were uploaded to MinIO.
+- Fix: corrected the thumbnail lookup path in `worker/index.ts` to `path.join(tempDir, "persons", person_id + ".jpg")`.
+
+**Fixes applied:**
+- `detect_persons.py`: Added `suppress_stdout_fd()` context manager (using `os.dup2` to redirect fd 1 → `/dev/null`) wrapping the `load_model()` call to prevent InsightFace/ONNX Runtime C-level writes from contaminating the JSON output.
+- `worker/index.ts`: Corrected the thumbnail file path from `path.join(tempDir, person_id + ".jpg")` to `path.join(tempDir, "persons", person_id + ".jpg")` to match the path written by `detect_persons.py`.
+
+**Out of Scope:** Changing the InsightFace model or detection pipeline; altering the thumbnail storage format or resolution; suppressing ONNX Runtime messages via its own logging API (unreliable across versions); multi-person selection (post-MVP).
+
+**Open Questions:** None
+
+**Size:** S  **Priority:** P0  **Sprint:** MVP
 
 ---
 

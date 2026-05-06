@@ -176,7 +176,8 @@ async function handleDetectPersons(job: Job<DetectPersonsJobData>): Promise<void
 
         // Upload person thumbnails to MinIO and merge into global list
         for (const person of detected) {
-          const cropPath = path.join(tempDir, `${person.person_id}.jpg`);
+          // detect_persons.py saves thumbnails to {tempDir}/persons/{person_id}.jpg
+          const cropPath = path.join(tempDir, "persons", `${person.person_id}.jpg`);
           try {
             const cropBuffer = await fs.readFile(cropPath);
             const personKey = objectKeys.person(session_id, person.person_id);
