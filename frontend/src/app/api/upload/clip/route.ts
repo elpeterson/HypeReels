@@ -124,21 +124,45 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Check for duplicate content (by filename + size as a basic proxy)
-    const duplicate = session.clips.find(
+    // Check for duplicate content (by filename + size as a basic proxy).
+    // If an identical clip is still uploading (e.g. the browser upload failed
+    // and the user is retrying), re-issue a fresh presigned URL for the same
+    // clip record rather than returning 409.
+    const existing = session.clips.find(
       (c) => c.filename === filename && c.size_bytes === size_bytes
     );
-    if (duplicate) {
-      return conflict(
-        "duplicate_clip",
-        "This clip has already been uploaded",
-        { existing_clip_id: duplicate.clip_id }
+    if (existing) {
+      if (existing.status === "ready") {
+        return conflict(
+          "duplicate_clip",
+          "This clip has already been uploaded",
+          { existing_clip_id: existing.clip_id }
+        );
+      }
+      // Status is "uploading" or "detection_failed" — re-issue a presigned URL
+      // so the browser can retry the upload without needing to restart the session.
+      const retryUrl = await createPresignedPutUrl(
+        existing.object_key,
+        normalizedType,
+        size_bytes
+      );
+      return NextResponse.json(
+        { clip_id: existing.clip_id, upload_url: retryUrl, object_key: existing.object_key },
+        { status: 200 }
       );
     }
 
     // Create clip record
     const clipId = uuidv4();
     const objectKey = objectKeys.clip(session_id, clipId, ext);
+
+    // Generate the presigned PUT URL FIRST — if this fails (e.g. MinIO
+    // not yet ready) no clip record is written to Redis, so a retry starts clean.
+    const uploadUrl = await createPresignedPutUrl(
+      objectKey,
+      normalizedType,
+      size_bytes
+    );
 
     const clip: Clip = {
       clip_id: clipId,
@@ -152,15 +176,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       highlights: [],
     };
 
-    // Persist clip to session before issuing presigned URL
+    // Persist clip to session only after the presigned URL is in hand.
     await addClipToSession(session_id, clip);
-
-    // Generate presigned PUT URL
-    const uploadUrl = await createPresignedPutUrl(
-      objectKey,
-      normalizedType,
-      size_bytes
-    );
 
     return NextResponse.json(
       { clip_id: clipId, upload_url: uploadUrl, object_key: objectKey },

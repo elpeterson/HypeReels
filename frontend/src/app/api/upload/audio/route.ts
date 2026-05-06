@@ -123,6 +123,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     const audioId = uuidv4();
     const objectKey = objectKeys.audio(session_id, ext);
 
+    // Generate the presigned PUT URL FIRST — if this fails no audio record is
+    // written to Redis, so a retry starts clean (no orphaned audio in session).
+    const uploadUrl = await createPresignedPutUrl(
+      objectKey,
+      normalizedType,
+      size_bytes
+    );
+
     const audio: AudioTrack = {
       audio_id: audioId,
       filename,
@@ -131,15 +139,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       object_key: objectKey,
     };
 
-    // Persist audio to session
+    // Persist audio to session only after the presigned URL is in hand.
     await updateSessionAudio(session_id, audio);
-
-    // Generate presigned PUT URL
-    const uploadUrl = await createPresignedPutUrl(
-      objectKey,
-      normalizedType,
-      size_bytes
-    );
 
     return NextResponse.json(
       { audio_id: audioId, upload_url: uploadUrl, object_key: objectKey },

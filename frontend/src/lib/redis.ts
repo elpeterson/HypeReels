@@ -26,7 +26,10 @@ export function getRedis(): Redis {
   if (!_redis) {
     _redis = new Redis(config.redis.url, {
       maxRetriesPerRequest: 3,
-      enableOfflineQueue: false,
+      // enableOfflineQueue: true (default) — allows commands to queue while the
+      // TCP handshake completes on startup. Setting this to false would cause
+      // the very first request after container start to fail with a write error
+      // even though depends_on: redis healthy has passed.
       lazyConnect: false,
     });
     _redis.on("error", (err) => {

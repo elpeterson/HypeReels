@@ -23,7 +23,15 @@ export const config = {
     url: optionalEnv("REDIS_URL", "redis://localhost:6379"),
   },
   minio: {
+    // Internal endpoint: used by the app container to talk to MinIO (server-side ops).
+    // Inside Docker Compose this is http://minio:9000.
     endpoint: optionalEnv("MINIO_ENDPOINT", "http://localhost:9000"),
+    // Public endpoint: embedded in presigned URLs returned to the browser.
+    // Must be reachable from the user's browser. Defaults to the same as endpoint
+    // for local dev (where app runs outside Docker). Inside Docker Compose,
+    // set MINIO_PUBLIC_URL=http://localhost:9000 so the browser can reach port 9000
+    // (which must also be exposed in docker-compose.yml).
+    publicUrl: optionalEnv("MINIO_PUBLIC_URL", optionalEnv("MINIO_ENDPOINT", "http://localhost:9000")),
     accessKeyId: optionalEnv("MINIO_ACCESS_KEY_ID", "minioadmin"),
     secretAccessKey: optionalEnv("MINIO_SECRET_ACCESS_KEY", "minioadmin"),
     bucket: optionalEnv("MINIO_BUCKET", "hypereels"),

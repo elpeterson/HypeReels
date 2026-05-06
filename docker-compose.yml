@@ -39,6 +39,11 @@ services:
       FFMPEG_HWACCEL: ${FFMPEG_HWACCEL:-}
       INSIGHTFACE_PROVIDERS: ${INSIGHTFACE_PROVIDERS:-CPUExecutionProvider}
       NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:3000}
+      # Public URL embedded in presigned URLs returned to the browser.
+      # Must be reachable from the user's browser — use localhost (not the internal
+      # Docker hostname "minio") because port 9000 is exposed to the host below.
+      # For LAN/remote access, set this to http://<host-ip>:9000 in your .env.
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-http://localhost:9000}
     depends_on:
       redis:
         condition: service_healthy
@@ -80,6 +85,14 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
     volumes:
       - minio_data:/data
+    ports:
+      # Port 9000 MUST be exposed so the browser can reach presigned PUT/GET URLs.
+      # Presigned URLs embed the public hostname (MINIO_PUBLIC_URL=http://localhost:9000).
+      # The browser uploads directly to MinIO — the app server is not in the upload path.
+      - "9000:9000"
+      # MinIO console — optional; useful for debugging stored objects.
+      # Remove this port mapping if you don't need the console UI.
+      - "9001:9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 15s
@@ -88,11 +101,6 @@ services:
       start_period: 10s
     networks:
       - internal
-    # MinIO API and console are intentionally NOT exposed to the host.
-    # Presigned URLs are the only access path (internal Docker network).
-    # To access the MinIO console during development, add:
-    #   ports:
-    #     - "9001:9001"
 
   # ── MinIO bucket initialisation ──────────────────────────────────────────────
   # One-shot container: creates the hypereels bucket on first run.

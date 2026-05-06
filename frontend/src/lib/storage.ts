@@ -18,10 +18,15 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "./config";
 
-// ─── Singleton client ────────────────────────────────────────────────────────
+// ─── Singleton clients ────────────────────────────────────────────────────────
 
 let _s3: S3Client | null = null;
+let _s3Presign: S3Client | null = null;
 
+/**
+ * S3 client for server-side operations (list, delete, get, put from worker).
+ * Uses the internal Docker network endpoint (http://minio:9000 inside Compose).
+ */
 export function getS3Client(): S3Client {
   if (!_s3) {
     _s3 = new S3Client({
@@ -35,6 +40,26 @@ export function getS3Client(): S3Client {
     });
   }
   return _s3;
+}
+
+/**
+ * S3 client used ONLY for presigning URLs returned to the browser.
+ * Uses MINIO_PUBLIC_URL so the embedded hostname is reachable from the
+ * user's browser (e.g. http://localhost:9000), not the internal Docker hostname.
+ */
+function getPresignClient(): S3Client {
+  if (!_s3Presign) {
+    _s3Presign = new S3Client({
+      endpoint: config.minio.publicUrl,
+      region: config.minio.region,
+      credentials: {
+        accessKeyId: config.minio.accessKeyId,
+        secretAccessKey: config.minio.secretAccessKey,
+      },
+      forcePathStyle: true,
+    });
+  }
+  return _s3Presign;
 }
 
 // ─── Object key helpers ───────────────────────────────────────────────────────
@@ -62,7 +87,7 @@ export async function createPresignedPutUrl(
   contentType: string,
   maxSizeBytes: number
 ): Promise<string> {
-  const client = getS3Client();
+  const client = getPresignClient(); // public URL — must be browser-reachable
 
   const command = new PutObjectCommand({
     Bucket: config.minio.bucket,
@@ -86,7 +111,7 @@ export async function createPresignedGetUrl(
   objectKey: string,
   ttlSeconds?: number
 ): Promise<string> {
-  const client = getS3Client();
+  const client = getPresignClient(); // public URL — must be browser-reachable
 
   const command = new GetObjectCommand({
     Bucket: config.minio.bucket,

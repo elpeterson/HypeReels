@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-017 added)
+> **Last updated:** 2026-05-06 (STORY-018 added)
 
 ---
 
@@ -364,6 +364,41 @@
 - `DELETE /api/upload/clip/[clip_id]` uses `clip.object_key` from the stored record rather than reconstructing it from the filename extension.
 
 **Out of Scope:** Changing the session ID transport mechanism for any other route family; resumable or chunked upload protocols; any change to S3 presigned URL generation logic beyond the MIME-type fix.
+
+**Open Questions:** None
+
+**Size:** M  **Priority:** P0  **Sprint:** MVP
+
+---
+
+### [STORY-018] Fix Cold-Start 500 / Network Error / 409 Cascade on Clip Upload
+
+**User Story:** As a user, I want clip uploads to succeed on the first attempt — including immediately after the server starts — so that I am never blocked from uploading before reel generation can begin.
+
+**Acceptance Criteria:**
+- [ ] Given the Docker Compose stack has just started (cold start), when the user uploads a clip within seconds of the app service becoming reachable, then `POST /api/upload/clip` returns a presigned URL (2xx) and does not return a 500 error caused by a Redis connection not yet being ready.
+- [ ] Given a presigned PUT URL is returned by the upload route, when the browser on the host machine performs the PUT, then the URL contains a hostname and port reachable from the host (e.g. `http://localhost:9000`) and not an internal Docker hostname (e.g. `http://minio:9000`) that the browser cannot resolve.
+- [ ] Given the browser uploads a file to the presigned URL, when the PUT request is made, then it succeeds (2xx) without a network error.
+- [ ] Given the user refreshes the page after a failed upload attempt, when they try to upload the same file again, then the upload succeeds (2xx) rather than returning 409 due to an orphaned clip record left in Redis from the previous failed attempt.
+- [ ] Given a clip is in `"uploading"` state in Redis (orphaned from a prior failed presigned-URL generation), when the user retries uploading the same clip, then the route issues a fresh presigned URL and returns 2xx rather than 409.
+- [ ] Given the MinIO service is running inside Docker Compose, when the app service starts, then port `9000` (S3 API) and port `9001` (MinIO console) are exposed to the host machine.
+- [ ] Given `MINIO_PUBLIC_URL` is set in the app service environment (e.g. `http://localhost:9000`), when the backend generates presigned PUT or GET URLs, then those URLs embed the value of `MINIO_PUBLIC_URL` rather than the internal `MINIO_ENDPOINT` hostname.
+- [ ] Given `MINIO_PUBLIC_URL` is not set, when the backend generates presigned URLs, then it falls back to `MINIO_ENDPOINT` without crashing.
+- [ ] Given the upload route handler is invoked, when it executes, then `createPresignedPutUrl` is called and succeeds before any write to Redis (`addClipToSession`) occurs — a Redis write never happens if URL generation fails.
+- [ ] Given the audio upload route handler is invoked, when it executes, then `createPresignedPutUrl` for the audio file is called and succeeds before any write to Redis occurs.
+
+**Root Cause (fixed):** Three bugs cascaded in sequence: (1) Redis client configured with `enableOfflineQueue: false` caused immediate command rejection if the TCP handshake had not completed before the first request; (2) presigned URLs embedded the internal Docker hostname `minio:9000`, which is unreachable from the host browser (port 9000 was also not exposed); (3) the upload route wrote the clip record to Redis before generating the presigned URL — a URL-generation failure left an orphaned `"uploading"` record, causing a 409 on retry.
+
+**Fixes applied:**
+- `redis.ts`: Removed `enableOfflineQueue: false`; ioredis default (`true`) queues commands until the connection is ready.
+- `config.ts`: Added `minio.publicUrl` sourced from `MINIO_PUBLIC_URL` env var, falling back to `MINIO_ENDPOINT`.
+- `storage.ts`: Added `getPresignClient()` using `config.minio.publicUrl`; `createPresignedPutUrl` and `createPresignedGetUrl` now use this client.
+- `docker-compose.yml`: Exposed MinIO ports `9000:9000` and `9001:9001`; added `MINIO_PUBLIC_URL: http://localhost:9000` to the app service environment.
+- `.env.example`: Added `MINIO_PUBLIC_URL=http://localhost:9000` with explanation.
+- `api/upload/clip/route.ts`: Moved `createPresignedPutUrl` before `addClipToSession`; on duplicate clip in `"uploading"` state, re-issues a fresh presigned URL instead of returning 409.
+- `api/upload/audio/route.ts`: Same presigned-URL-first ordering fix applied.
+
+**Out of Scope:** Resumable or chunked upload protocols; changing the Redis client library; MinIO TLS or public-internet presigned URL configuration (post-MVP); multi-host or split-network Docker deployments.
 
 **Open Questions:** None
 
