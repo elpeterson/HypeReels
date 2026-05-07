@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import { HighlightRange, AddHighlightForm } from "./HighlightRange";
 import { Banner } from "@/components/ui/Banner";
-import { saveHighlights, deleteHighlight } from "@/lib/api";
+import { addHighlight, deleteHighlight } from "@/lib/api";
 import { formatDuration } from "@/lib/validation";
 import type { Clip, Highlight } from "@/types";
 
@@ -39,19 +39,12 @@ export function ClipHighlighter({
       setSaving(true);
       setError(null);
 
-      const newHighlights = [
-        ...highlights,
-        { start_ms: startMs, end_ms: endMs },
-      ];
-
       try {
-        const saved = await saveHighlights(
-          sessionId,
-          clip.clip_id,
-          newHighlights
-        );
-        setHighlights(saved);
-        onHighlightsChanged(clip.clip_id, saved);
+        // Backend appends and returns the newly created highlight.
+        const created = await addHighlight(sessionId, clip.clip_id, startMs, endMs);
+        const updated = [...highlights, created];
+        setHighlights(updated);
+        onHighlightsChanged(clip.clip_id, updated);
       } catch (err: unknown) {
         const msg =
           err instanceof Error ? err.message : "Failed to save highlight.";

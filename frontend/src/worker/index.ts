@@ -219,6 +219,65 @@ async function handleDetectPersons(job: Job<DetectPersonsJobData>): Promise<void
       });
     }
 
+    // ── STORY-026: Cross-clip deduplication ──────────────────────────────────
+    // Each clip generates fresh person_ids, so the same real person detected
+    // in two different clips appears as two separate entries in allPersons.
+    // Compare representative embeddings across all persons using cosine
+    // distance (same 0.55 threshold used by detect_persons.py within a clip).
+    // When two persons match, merge their appearances and keep the one with
+    // higher confidence as the canonical entry.
+    const CROSS_CLIP_THRESHOLD = 0.55;
+
+    function cosineDist(a: number[], b: number[]): number {
+      let dot = 0, normA = 0, normB = 0;
+      for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        normA += a[i] * a[i];
+        normB += b[i] * b[i];
+      }
+      if (normA === 0 || normB === 0) return 1;
+      return 1 - dot / (Math.sqrt(normA) * Math.sqrt(normB));
+    }
+
+    const personList = Object.values(allPersons);
+    const merged = new Set<string>(); // person_ids absorbed into another
+
+    for (let i = 0; i < personList.length; i++) {
+      if (merged.has(personList[i].person_id)) continue;
+      const embA = personList[i].embedding;
+      if (!embA) continue;
+
+      for (let j = i + 1; j < personList.length; j++) {
+        if (merged.has(personList[j].person_id)) continue;
+        const embB = personList[j].embedding;
+        if (!embB) continue;
+
+        if (cosineDist(embA, embB) < CROSS_CLIP_THRESHOLD) {
+          // Same person — merge j into i (keep higher-confidence thumbnail/bbox)
+          const keep = personList[i];
+          const absorb = personList[j];
+          keep.appearances.push(...absorb.appearances);
+          if (absorb.confidence > keep.confidence) {
+            keep.confidence = absorb.confidence;
+            keep.thumbnail = absorb.thumbnail;
+            keep.bbox = absorb.bbox;
+          }
+          merged.add(absorb.person_id);
+          delete allPersons[absorb.person_id];
+          console.log(
+            `[detect-persons] merged cross-clip duplicate: ${absorb.person_id} → ${keep.person_id}`
+          );
+        }
+      }
+    }
+
+    if (merged.size > 0) {
+      console.log(
+        `[detect-persons] cross-clip dedup removed ${merged.size} duplicate(s), ` +
+        `${Object.keys(allPersons).length} unique person(s) remain`
+      );
+    }
+
     // Write merged persons to Redis
     // DetectedPerson and Person share the same shape — cast is safe
     await setPersons(session_id, Object.values(allPersons) as import("../types").Person[]);

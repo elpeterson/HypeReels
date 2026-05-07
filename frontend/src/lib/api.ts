@@ -386,25 +386,24 @@ export async function setPersonOfInterest(
 
 /**
  * PATCH /api/session/{id}/clips/{clip_id}/highlights
- * Adds or updates a highlight range on a clip.
- *
- * @api_issues [UNVERIFIED] Architecture says "Add or update" but doesn't
- * clarify if this replaces all highlights or appends one. Assumed: sends
- * full array to replace. Backend engineer must confirm.
+ * Appends a single new highlight range to a clip.
+ * Backend appends and returns { highlight: Highlight }.
  */
-export async function saveHighlights(
+export async function addHighlight(
   sessionId: string,
   clipId: string,
-  highlights: Array<{ start_ms: number; end_ms: number }>
-): Promise<Highlight[]> {
-  return apiFetch<Highlight[]>(
+  startMs: number,
+  endMs: number
+): Promise<Highlight> {
+  const data = await apiFetch<{ highlight: Highlight }>(
     `/api/session/${sessionId}/clips/${clipId}/highlights`,
     {
       method: "PATCH",
       sessionId,
-      body: { highlights },
+      body: { start_ms: startMs, end_ms: endMs },
     }
   );
+  return data.highlight;
 }
 
 /**

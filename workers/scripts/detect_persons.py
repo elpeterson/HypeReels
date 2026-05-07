@@ -54,6 +54,7 @@ SAMPLE_INTERVAL_MS = 500          # Sample every ~500 ms
 LOW_CONFIDENCE_THRESHOLD = 0.70   # STORY-003: flag but still include below this
 FACE_SIMILARITY_THRESHOLD = 0.55  # cosine distance to consider two embeddings the same person
 MIN_FACE_SIZE_PX = 20             # Ignore tiny detections (noise)
+THUMBNAIL_PADDING_FACTOR = 2.5    # STORY-028: expand crop to 2.5× bbox to show head/shoulders
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -178,12 +179,18 @@ def detect_faces_in_frames(
             if w < MIN_FACE_SIZE_PX or h < MIN_FACE_SIZE_PX:
                 continue
 
-            # Clamp coords to frame bounds
+            # STORY-028: expand crop by THUMBNAIL_PADDING_FACTOR so the
+            # thumbnail shows head + shoulders instead of just the face.
+            # Expand symmetrically from the face center, then clamp to frame.
             fh, fw = bgr_frame.shape[:2]
-            x1c = max(0, x1)
-            y1c = max(0, y1)
-            x2c = min(fw, x2)
-            y2c = min(fh, y2)
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            half_w = (w * THUMBNAIL_PADDING_FACTOR) / 2.0
+            half_h = (h * THUMBNAIL_PADDING_FACTOR) / 2.0
+            x1c = max(0, int(cx - half_w))
+            y1c = max(0, int(cy - half_h))
+            x2c = min(fw, int(cx + half_w))
+            y2c = min(fh, int(cy + half_h))
             crop = bgr_frame[y1c:y2c, x1c:x2c]
 
             embedding = face.embedding if hasattr(face, "embedding") and face.embedding is not None else None
@@ -346,12 +353,18 @@ def main() -> None:
                 f"{LOW_CONFIDENCE_THRESHOLD} — may be inaccurate"
             )
 
+        # STORY-026: include the representative embedding so the Node.js worker
+        # can run cross-clip deduplication after all clips are processed.
+        rep_emb = cluster.get("representative_embedding")
+        embedding_list = rep_emb.tolist() if rep_emb is not None else None
+
         results.append({
             "person_id": person_id,
             "bbox": bbox,
             "thumbnail": thumbnail_rel,
             "confidence": round(confidence, 4),
             "appearances": cluster["appearances"],
+            "embedding": embedding_list,
         })
 
     for warn in low_confidence_warnings:

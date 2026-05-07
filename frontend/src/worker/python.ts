@@ -16,6 +16,8 @@ export interface DetectedPerson {
   thumbnail: string;
   confidence: number;
   appearances: Array<{ clip_id: string; timestamp_ms: number }>;
+  /** Representative face embedding for cross-clip deduplication (STORY-026). */
+  embedding?: number[] | null;
 }
 
 export interface AudioAnalysis {

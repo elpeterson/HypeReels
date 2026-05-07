@@ -2,7 +2,7 @@
 
 > **Backlog owner:** @product-owner
 > **Status:** Sprint 1 — MVP
-> **Last updated:** 2026-05-06 (STORY-028 added)
+> **Last updated:** 2026-05-06 (STORY-029 added)
 
 ---
 
@@ -686,6 +686,33 @@ Define `THUMBNAIL_PADDING_FACTOR = 2.5` in the constants section alongside `FACE
 **Open Questions:** None
 
 **Size:** XS  **Priority:** P1  **Sprint:** MVP
+
+---
+
+### [STORY-029] Fix 422 on Add Highlight — Request/Response Shape Mismatch Between Frontend and Backend
+
+**User Story:** As a user, I want to add highlight ranges to my clips without errors so that the system can prioritize those moments when building the reel.
+
+**Acceptance Criteria:**
+- [ ] Given the highlights page is open and the user enters a valid start and end time, when the user clicks "Add", then the highlight is saved without error and no 422 response is returned.
+- [ ] Given a highlight is successfully saved, when the server responds, then the new highlight appears immediately in the clip's highlight list without requiring a page reload.
+- [ ] Given the user submits an invalid range (overlapping an existing highlight, out of clip bounds, or shorter than 1 second), when the server rejects the request, then the validation error message from the server is displayed inline and no highlight is added to the list.
+
+**Root Cause (fixed):** Two-sided contract mismatch between frontend and backend:
+
+Bug 1 — Request shape: `saveHighlights()` in `api.ts` sent the full accumulated highlights array as `{ highlights: [{start_ms, end_ms}, ...] }`. The backend route expects a single-highlight append with a flat body `{ start_ms: number, end_ms: number }`. Because the frontend was not spreading individual fields, `start_ms` and `end_ms` arrived as `undefined`, causing the backend to immediately return 422 "start_ms and end_ms must be numbers".
+
+Bug 2 — Response shape: The backend route returns `{ highlight: Highlight }` (a single-object envelope). The frontend typed the response as `Highlight[]` (an array). Even if the request shape had been correct, the component would have received the wrapper object in place of an array and crashed when trying to call `.map()` on it.
+
+**Fixes applied:**
+- Renamed `saveHighlights()` to `addHighlight(sessionId, clipId, startMs, endMs)` in `api.ts`; the new function sends `{ start_ms, end_ms }` (flat, single-item body) and unwraps the `{ highlight }` response envelope, returning a single `Highlight` object.
+- Updated `ClipHighlighter.tsx` to call `addHighlight()` and append the returned `Highlight` to local state (instead of replacing the entire state array with the server's response).
+
+**Out of Scope:** Bulk-replace of multiple highlights in a single request; reordering or editing existing highlights (add and delete only for MVP); any change to how the backend stores or validates highlight ranges.
+
+**Open Questions:** None
+
+**Size:** XS  **Priority:** P0  **Sprint:** MVP
 
 ---
 
