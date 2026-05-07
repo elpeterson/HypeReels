@@ -228,7 +228,7 @@ async function handleDetectPersons(job: Job<DetectPersonsJobData>): Promise<void
     // higher confidence as the canonical entry.
     const CROSS_CLIP_THRESHOLD = 0.55;
 
-    function cosineDist(a: number[], b: number[]): number {
+    const cosineDist = (a: number[], b: number[]): number => {
       let dot = 0, normA = 0, normB = 0;
       for (let i = 0; i < a.length; i++) {
         dot += a[i] * b[i];
@@ -237,7 +237,7 @@ async function handleDetectPersons(job: Job<DetectPersonsJobData>): Promise<void
       }
       if (normA === 0 || normB === 0) return 1;
       return 1 - dot / (Math.sqrt(normA) * Math.sqrt(normB));
-    }
+    };
 
     const personList = Object.values(allPersons);
     const merged = new Set<string>(); // person_ids absorbed into another
